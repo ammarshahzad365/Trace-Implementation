@@ -59,6 +59,46 @@ Each domain folder stores:
 - `manifest.json` - the sync record for that domain. It tracks the source collection, the last successful fetch time, the run mode, and counts used to decide what changed.
 - `delta.json` - the change set from the most recent incremental run. This is written only by the incremental crawler.
 
+## What the data looks like
+
+Every `latest.json`/`derived.json`/`delta.json`/`history/<version>.json` is
+one flat STIX 2.1 bundle: `{"type": "bundle", "id": "...", "objects": [...]}`.
+`enterprise/latest.json` alone holds 25,843 objects across a dozen-plus STIX
+types (`relationship` 21,025, `attack-pattern` 858, `malware` 729,
+`x-mitre-analytic` 1,758, `x-mitre-detection-strategy` 699,
+`course-of-action` 268, `intrusion-set` 189, `tool` 95, `campaign` 56,
+`x-mitre-tactic` 15, plus one each of `identity`/`marking-definition`/
+`x-mitre-collection`/`x-mitre-matrix`). `ics/` additionally has
+`x-mitre-asset` (physical/logical ICS assets), unique to that domain. A
+technique and the relationship that ties software to it (both trimmed):
+
+```json
+{
+  "id": "attack-pattern--43e7dc91-05b2-474c-b9ac-2ed4fe101f4d",
+  "name": "Process Injection",
+  "external_references": [{"external_id": "T1055", "source_name": "mitre-attack", "url": "https://attack.mitre.org/techniques/T1055"}],
+  "kill_chain_phases": [{"kill_chain_name": "mitre-attack", "phase_name": "privilege-escalation"}],
+  "x_mitre_platforms": ["Linux", "macOS", "Windows"], "x_mitre_version": "2.0"
+}
+```
+```json
+{
+  "id": "relationship--0200e185-a06e-470c-af16-814f84f1f6d7",
+  "relationship_type": "uses",
+  "source_ref": "malware--66637cd6-ae68-4bcd-af82-32f70a854175",
+  "target_ref": "attack-pattern--43e7dc91-05b2-474c-b9ac-2ed4fe101f4d"
+}
+```
+
+`relationship_type` values seen in `enterprise`: `uses` (malware/intrusion-set/
+campaign/tool → technique, and intrusion-set → malware/tool), `mitigates`
+(course-of-action → technique), `detects` (detection-strategy → technique),
+`subtechnique-of` and `revoked-by` (technique → technique), and
+`attributed-to` (campaign → intrusion-set). Note that technique↔tactic is
+**not** a `relationship` object at all — it's a string match between
+`attack-pattern.kill_chain_phases[].phase_name` and
+`x-mitre-tactic.x_mitre_shortname`.
+
 ## Run
 
 The easiest way to run the tools is with the interactive PowerShell launcher in this folder:

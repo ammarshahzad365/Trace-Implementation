@@ -52,6 +52,40 @@ data-acquisition/CVE/
 year (one paginated call sweeps the whole dataset, or the whole modified-since
 window), so the fetch bookkeeping is global and only the storage is sharded by year.
 
+## What the data looks like
+
+Every `records/<year>/latest.json` (and `delta.json`) is one JSON object:
+`{"id": "bundle--<uuid5>", "objects": [ ...vulnerability objects... ]}`. Each
+entry in `objects` is a STIX 2.1 `vulnerability` object, e.g. (trimmed):
+
+```json
+{
+  "created": "1999-12-30T05:00:00.000Z",
+  "description": "ip_input.c in BSD-derived TCP/IP implementations allows remote attackers to cause a denial of service (crash or hang) via crafted packets.",
+  "external_references": [
+    {"external_id": "CVE-1999-0001", "source_name": "cve", "url": "https://nvd.nist.gov/vuln/detail/CVE-1999-0001"},
+    {"source_name": "cve@mitre.org", "url": "http://www.openbsd.org/errata23.html#tcpfix"}
+  ],
+  "id": "vulnerability--bc9f5fb3-6f23-5604-ab10-c90e78c60857",
+  "modified": "2026-06-16T21:47:13.977Z",
+  "name": "CVE-1999-0001",
+  "spec_version": "2.1",
+  "type": "vulnerability",
+  "x_nvd_configurations": [ /* raw NVD CPE-applicability nodes, unchanged */ ],
+  "x_nvd_cvss": { "cvssMetricV2": [ /* raw NVD metrics, all versions/sources verbatim */ ] },
+  "x_nvd_source_identifier": "cve@mitre.org",
+  "x_nvd_vuln_status": "Modified",
+  "x_nvd_weaknesses": ["CWE-20"]
+}
+```
+
+Objects are pretty-printed with sorted keys, so fields appear alphabetically,
+not in the order `cve_to_stix()` builds them. `x_nvd_weaknesses` is the direct
+CVE → CWE cross-reference (a CWE id, or an NVD fallback label like
+`"NVD-CWE-noinfo"` when NVD hasn't assigned a specific CWE). Every field is
+deterministic across runs (the `id` is a `uuid5` hash of the CVE ID, not
+random), so re-fetching unchanged data produces byte-identical output.
+
 ## STIX mapping
 
 Each NVD CVE record becomes one STIX 2.1 `vulnerability` object:

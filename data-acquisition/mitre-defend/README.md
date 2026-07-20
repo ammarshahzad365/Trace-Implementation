@@ -78,6 +78,51 @@ data-acquisition/mitre-defend/
 No API key or rate limiting is needed — the D3FEND API has no stated auth or
 quota, though it is documented as "alpha".
 
+## What the data looks like
+
+Every `<domain>/latest.json`/`delta.json` is
+`{"domain": "...", "count": N, "records": [...]}`. For the five JSON-LD
+domains (`technique`/`tactic`/`artifact`/`weakness`/`offensive-technique`),
+each record is keyed by `@id` and stamped with the two bookkeeping fields this
+crawler adds itself (`_first_seen_at`, `_content_hash` — see above):
+
+```json
+{"@id": "d3f:AccessMediation", "d3f:d3fend-id": "D3-AMED", "rdfs:label": "Access Mediation", "d3f:synonym": "Access Control"}
+{"@id": "d3f:CWE-119", "d3f:cwe-id": ["CWE-119"], "rdfs:label": ["Improper Restriction of Operations within the Bounds of a Memory Buffer"], "d3f:weakness-of": [{"@id": "d3f:RawMemoryAccessFunction"}]}
+{"@id": "d3f:T1001", "d3f:attack-id": "T1001", "rdfs:label": "Data Obfuscation"}
+```
+
+`weakness.d3f:cwe-id` is the direct D3FEND → CWE link; `offensive-technique.
+d3f:attack-id` is the direct D3FEND → ATT&CK link (an exact `T####[.###]`
+match against ATT&CK's own `external_id`). `rdfs:subClassOf`/`hasSubClass` and
+`d3f:weakness-of` express hierarchy/relatedness *within* D3FEND's own
+ontology. Note that these five domains carry **no** relation to each other's
+techniques/tactics/artifacts beyond that — technique↔tactic↔artifact
+relationships live only in `mapping`.
+
+`mapping` rows look nothing like the other five — no `@id`, every field
+wrapped SPARQL-binding-style as `{"type": "uri"|"literal", "value": ...}` —
+because each row is a full defense↔offense trace, not an entity:
+
+```json
+{
+  "def_tech_label": {"value": "File Analysis"},
+  "def_artifact_label": {"value": "File"}, "def_artifact_rel_label": {"value": "analyzes"},
+  "def_tactic_label": {"value": "Detect"},
+  "off_tech_id": {"value": "T1055.001"}, "off_tech_label": {"value": "Dynamic-link Library Injection"},
+  "off_tech_parent_label": {"value": "Process Injection"},
+  "off_artifact_label": {"value": "Shared Library File"}, "off_artifact_rel_label": {"value": "adds"},
+  "off_tactic_label": {"value": "Defense Evasion"}
+}
+```
+
+Read as: *D3FEND's "File Analysis" technique (analyzes File artifacts, under
+Detect) counters ATT&CK's T1055.001 "Dynamic-link Library Injection" (a
+sub-technique of Process Injection, under Defense Evasion, which adds a
+Shared Library File artifact)*. Every `def_tech`/`def_artifact`/`off_tech_id`
+value is a foreign key back into the other five domains' `@id`/`d3f:attack-id`
+fields.
+
 ## Useful flags
 
 - `--dry-run` - fetch and diff without writing any files.

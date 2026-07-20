@@ -54,9 +54,12 @@ data-acquisition/CWE/
 No API key or rate limiting is needed — `cwe.mitre.org` is a public download, no
 authentication required.
 
-## Record shape
+## What the data looks like
 
-Each XML entry (`Weakness`, `Category`, or `View`) becomes one JSON object:
+`latest.json`/`delta.json` are one JSON object each:
+`{"id": "bundle--...", "type": "bundle", "objects": [ ...records... ]}`, mixing
+all three entry types in one flat array. Each XML entry (`Weakness`,
+`Category`, or `View`) becomes one JSON object:
 
 - `type`: `"weakness"`, `"category"`, or `"view"`
 - `id`: `"CWE-<ID>"` (globally unique across all three types)
@@ -66,6 +69,33 @@ Each XML entry (`Weakness`, `Category`, or `View`) becomes one JSON object:
 - every other XML field, converted generically (child elements become nested
   JSON objects/arrays; tag names have underscores stripped to match MITRE's own
   `cwe-api.mitre.org` JSON naming, e.g. `Common_Consequences` -> `CommonConsequences`)
+
+A `weakness` record is the deepest of the three (trimmed — a real one has many
+more optional nested sections such as `DetectionMethods`, `ObservedExamples`,
+`TaxonomyMappings`):
+
+```json
+{
+  "type": "weakness", "id": "CWE-89", "cwe_id": "89",
+  "Name": "Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')",
+  "Abstraction": "Base", "Structure": "Simple", "Status": "Stable",
+  "RelatedWeaknesses": {"RelatedWeakness": [{"Nature": "ChildOf", "CWE_ID": "943", "View_ID": "1000"}]},
+  "CommonConsequences": {"Consequence": [{"Scope": ["Confidentiality","Integrity","Availability"], "Impact": "Execute Unauthorized Code or Commands"}]},
+  "RelatedAttackPatterns": {"RelatedAttackPattern": [{"CAPEC_ID": "108"}, {"CAPEC_ID": "66"}]},
+  "created": "2006-07-19T00:00:00.000Z",
+  "modified": "2025-12-11T00:00:00.000Z"
+}
+```
+
+`RelatedAttackPatterns` is the direct CWE → CAPEC cross-reference (bare
+numeric CAPEC ids). `category` and `view` records are much flatter — their
+only meaningful nested field is membership (`Relationships`/`Members` →
+`HasMember`, a list of `{CWE_ID, View_ID}` pairs):
+
+```json
+{"type": "category", "id": "CWE-19", "cwe_id": "19", "Name": "Data Processing Errors", "Status": "Draft",
+ "Relationships": {"HasMember": [{"CWE_ID": "130", "View_ID": "699"}, {"CWE_ID": "166", "View_ID": "699"}]}}
+```
 
 ## Useful flags
 
