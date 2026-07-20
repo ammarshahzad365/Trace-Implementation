@@ -1,4 +1,4 @@
-# CAPEC Parser
+# CAPEC Preprocessing
 
 Trims the raw CAPEC STIX bundle (`data-acquisition/CAPEC/latest.json`) down
 to a fixed field whitelist per object type. A field-projection pass, not
@@ -9,7 +9,7 @@ whitelist was chosen from.
 ## Usage
 
 ```
-py capec_parser.py
+py capec_preprocessing.py
 ```
 
 Optional flags: `--input` (path to `latest.json`, default: the CAPEC
@@ -20,7 +20,7 @@ crawler's own output) and `--output-dir` (default: this folder).
 - Drops `identity` and `marking-definition` objects entirely (STIX
   attribution/marking boilerplate, no domain content).
 - Keeps `attack-pattern`, `course-of-action`, and `relationship` objects,
-  each reduced to a whitelist of fields (see `capec_parser.py`'s
+  each reduced to a whitelist of fields (see `capec_preprocessing.py`'s
   `*_FIELDS` constants for the exact list). A field missing on a given
   record (most `x_capec_*` fields are optional) is simply omitted, not
   written as `null`.

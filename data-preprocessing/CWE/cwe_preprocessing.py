@@ -42,7 +42,6 @@ WEAKNESS_FIELDS: Tuple[str, ...] = COMMON_FIELDS + (
     "AlternateTerms",
     "PotentialMitigations",
     "DetectionMethods",
-    "DemonstrativeExamples",
     "BackgroundDetails",
     "ObservedExamples",
     "AffectedResources",
