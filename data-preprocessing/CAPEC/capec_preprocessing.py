@@ -1,15 +1,19 @@
 """CAPEC field-projection preprocessor.
 
 Reads the raw STIX 2.1 bundle produced by the CAPEC crawler
-(`data-acquisition/CAPEC/latest.json`) and writes three trimmed JSON files,
-one per kept object type, each record reduced to a fixed field whitelist.
+(`data-acquisition/CAPEC/latest.json`) and writes four trimmed JSON files.
 `identity` and `marking-definition` objects are dropped entirely -- they're
 pure STIX attribution/marking boilerplate, not domain content.
 
-This is a straight field projection, not entity/relationship graph-edge
-extraction -- fields like `x_capec_child_of_refs` or `external_references`
-are kept whole on the attack-pattern record itself, not split out into
-separate edge records.
+`external_references` is not kept verbatim on attack-pattern records:
+- its `source_name == "capec"` entry (always exactly one) becomes a plain
+  `capec_id` integer attribute instead of a nested reference object.
+- its `cwe` / `ATTACK` entries become STIX-shaped relationship records in a
+  separate `external_relationships.json` (`CAPEC-N --related-to--> CWE-N` /
+  `--related-to--> T####`), the same shape as `relationships.json`'s
+  `mitigates` edges.
+- its `reference_from_CAPEC` / `OWASP Attacks` / `WASC` entries (bibliographic
+  citations, no local entity) are dropped entirely, not stored anywhere.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
@@ -25,7 +30,6 @@ ATTACK_PATTERN_FIELDS: Tuple[str, ...] = (
     "name",
     "description",
     "type",
-    "external_references",
     "x_capec_abstraction",
     "x_capec_status",
     "x_capec_domains",
@@ -70,10 +74,18 @@ FIELDS_BY_TYPE: Dict[str, Tuple[str, ...]] = {
 
 DROPPED_TYPES = {"identity", "marking-definition"}
 
+# external_references source_name values that become external_relationships.json rows.
+EXTERNAL_RELATIONSHIP_SOURCE_NAMES = {"cwe", "ATTACK"}
+
+EXTERNAL_RELATIONSHIP_TYPE = "related-to"
+
+EXTERNAL_RELATIONSHIP_KEY = "external-relationship"
+
 OUTPUT_FILENAMES: Dict[str, str] = {
     "attack-pattern": "attack_patterns.json",
     "course-of-action": "courses_of_action.json",
     "relationship": "relationships.json",
+    EXTERNAL_RELATIONSHIP_KEY: "external_relationships.json",
 }
 
 
@@ -94,12 +106,63 @@ def filter_object(obj: Dict[str, Any], fields: Tuple[str, ...]) -> Dict[str, Any
     return {field: obj[field] for field in fields if field in obj}
 
 
+def extract_capec_id(obj: Dict[str, Any]) -> int:
+    for ref in obj.get("external_references", []):
+        if ref.get("source_name") == "capec":
+            external_id = str(ref.get("external_id") or "")
+            return int(external_id.split("-", 1)[1])
+    raise ParseError(f"attack-pattern {obj.get('id')} has no 'capec' external_reference")
+
+
+def make_external_relationship(source_ref: str, target_ref: str, source_name: str) -> Dict[str, Any]:
+    seed = f"capec-preprocessing:{source_ref}|{EXTERNAL_RELATIONSHIP_TYPE}|{target_ref}"
+    relationship_uuid = uuid.uuid5(uuid.NAMESPACE_URL, seed)
+    return {
+        "id": f"relationship--{relationship_uuid}",
+        "type": "relationship",
+        "relationship_type": EXTERNAL_RELATIONSHIP_TYPE,
+        "source_ref": source_ref,
+        "target_ref": target_ref,
+        "source_name": source_name,
+    }
+
+
+def build_external_relationships(obj: Dict[str, Any], capec_id: int) -> List[Dict[str, Any]]:
+    source_ref = f"CAPEC-{capec_id}"
+    relationships = []
+    for ref in obj.get("external_references", []):
+        source_name = ref.get("source_name")
+        if source_name not in EXTERNAL_RELATIONSHIP_SOURCE_NAMES:
+            continue
+        target_ref = ref.get("external_id")
+        if not target_ref:
+            continue
+        relationships.append(make_external_relationship(source_ref, target_ref, source_name))
+    return relationships
+
+
+def build_attack_pattern_record(obj: Dict[str, Any], capec_id: int) -> Dict[str, Any]:
+    record: Dict[str, Any] = {}
+    for field in ATTACK_PATTERN_FIELDS:
+        if field in obj:
+            record[field] = obj[field]
+        if field == "id":
+            record["capec_id"] = capec_id
+    return record
+
+
 def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     result: Dict[str, List[Dict[str, Any]]] = {obj_type: [] for obj_type in FIELDS_BY_TYPE}
+    result[EXTERNAL_RELATIONSHIP_KEY] = []
     dropped_counts: Dict[str, int] = {}
 
     for obj in objects:
         obj_type = str(obj.get("type") or "")
+        if obj_type == "attack-pattern":
+            capec_id = extract_capec_id(obj)
+            result["attack-pattern"].append(build_attack_pattern_record(obj, capec_id))
+            result[EXTERNAL_RELATIONSHIP_KEY].extend(build_external_relationships(obj, capec_id))
+            continue
         fields = FIELDS_BY_TYPE.get(obj_type)
         if fields is not None:
             result[obj_type].append(filter_object(obj, fields))
@@ -140,7 +203,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default=str(default_output_dir),
-        help=f"Directory to write attack_patterns.json / courses_of_action.json / relationships.json (default: {default_output_dir})",
+        help=(
+            "Directory to write attack_patterns.json / courses_of_action.json / "
+            f"relationships.json / external_relationships.json (default: {default_output_dir})"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -158,7 +224,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "[capec-parser] wrote "
             f"{counts['attack-pattern']} attack-patterns, "
             f"{counts['course-of-action']} courses-of-action, "
-            f"{counts['relationship']} relationships "
+            f"{counts['relationship']} relationships, "
+            f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external relationships "
             f"to {output_dir}"
         )
         return 0
