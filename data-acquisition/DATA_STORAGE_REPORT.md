@@ -692,3 +692,84 @@ Where D3FEND diverges is the one place it *had* to: no native timestamps
 means no `object_modified_key()`-style ordering is possible, so it's the only
 source using content-hash equality instead of "is this newer" as the
 definition of "changed."
+
+---
+
+## 11. Consolidated relationship reference (for knowledge graph construction)
+
+Everything below is pulled from §6–§7's verified findings, reorganized into
+flat, parser-ready tables — one row per extractable relation, in the shape
+`(subject_type, relation, object_type)` plus exactly which field to read it
+from. This is the section to work off of when writing the entity/relationship
+extraction code; §6–§7 have the narrative reasoning and counts if you need to
+double-check something here.
+
+### 11.1 Intra-source relations (edges within one source's own data)
+
+| # | Source | Subject type | Relation | Object type | Field on disk | Count | Notes |
+|---|---|---|---|---|---|---|---|
+| 1 | CWE | Weakness | `ChildOf` | Weakness | `RelatedWeaknesses.RelatedWeakness[Nature=ChildOf]` | 1,318 | only the child side is stored — add the inverse yourself |
+| 2 | CWE | Weakness | `CanPrecede` | Weakness | `RelatedWeaknesses.RelatedWeakness[Nature=CanPrecede]` | 143 | |
+| 3 | CWE | Weakness | `PeerOf` | Weakness | `RelatedWeaknesses.RelatedWeakness[Nature=PeerOf]` | 98 | symmetric in meaning, stored one-directionally |
+| 4 | CWE | Weakness | `CanAlsoBe` | Weakness | `RelatedWeaknesses.RelatedWeakness[Nature=CanAlsoBe]` | 27 | |
+| 5 | CWE | Weakness | `Requires` | Weakness | `RelatedWeaknesses.RelatedWeakness[Nature=Requires]` | 13 | |
+| 6 | CWE | Weakness | `StartsWith` | Weakness | `RelatedWeaknesses.RelatedWeakness[Nature=StartsWith]` | 3 | |
+| 7 | CWE | Category | `HasMember` | Weakness | `Category.Relationships.HasMember` | 4,260 | scoped by `View_ID` |
+| 8 | CWE | View | `HasMember` | Weakness | `View.Members.HasMember` | 764 | scoped by `View_ID` |
+| 9 | CAPEC | CourseOfAction | `Mitigates` | AttackPattern | STIX `relationship` object (`source_ref`/`target_ref`) | 1,172 | the only relationship_type CAPEC uses |
+| 10 | CAPEC | AttackPattern | `ChildOf` | AttackPattern | `x_capec_child_of_refs` | — | embedded ref array, not a STIX relationship object |
+| 11 | CAPEC | AttackPattern | `ParentOf` | AttackPattern | `x_capec_parent_of_refs` | — | 553/615 attack-patterns carry ≥1 of #10–#14 |
+| 12 | CAPEC | AttackPattern | `PeerOf` | AttackPattern | `x_capec_peer_of_refs` | — | |
+| 13 | CAPEC | AttackPattern | `CanPrecede` | AttackPattern | `x_capec_can_precede_refs` | — | |
+| 14 | CAPEC | AttackPattern | `CanFollow` | AttackPattern | `x_capec_can_follow_refs` | — | |
+| 15 | ATT&CK | Malware/IntrusionSet/Campaign/Tool | `Uses` | Technique | STIX `relationship` (`relationship_type="uses"`) | 10,342 + 4,546 + 1,146 + 869 | by subject type, enterprise domain |
+| 16 | ATT&CK | IntrusionSet | `Uses` | Malware / Tool | STIX `relationship` | 673 / 472 | |
+| 17 | ATT&CK | CourseOfAction | `Mitigates` | Technique | STIX `relationship` | 1,448 | |
+| 18 | ATT&CK | DetectionStrategy | `Detects` | Technique | STIX `relationship` | 697 | |
+| 19 | ATT&CK | Technique | `SubtechniqueOf` | Technique | STIX `relationship` | 477 | |
+| 20 | ATT&CK | Technique/IntrusionSet/Malware/Tool | `RevokedBy` | same type | STIX `relationship` | 149 + 6 + 1 + 1 | deprecation/merge pointer |
+| 21 | ATT&CK | Campaign | `AttributedTo` | IntrusionSet | STIX `relationship` | 26 | |
+| 22 | ATT&CK | Technique | `HasTactic` | Tactic | `kill_chain_phases[].phase_name` == `x-mitre-tactic.x_mitre_shortname` | — | **string match, not an id ref** |
+| 23 | ATT&CK | Matrix | `HasTactic` (ordered) | Tactic | `x-mitre-matrix.tactic_refs` | 15 | |
+| 24 | ATT&CK | DetectionStrategy | `HasAnalytic` | Analytic | `x_mitre_analytic_refs` | — | |
+| 25 | ATT&CK | Analytic | `CitesDataComponent` | DataComponent | `x_mitre_log_source_references[].x_mitre_data_component_ref` | — | |
+| 26 | D3FEND | any class | `subClassOf` / `hasSubClass` (inverse) | same domain's class | `rdfs:subClassOf` / `rdfs:hasSubClass` | — | technique/tactic/artifact/weakness ontology hierarchy |
+| 27 | D3FEND | Weakness | `WeaknessOf` | Artifact | `d3f:weakness-of` | 26 | all 26 resolve into `artifacts` |
+| 28 | D3FEND | Weakness | `MayBeWeaknessOf` | Artifact | `d3f:may-be-weakness-of` | 3 | |
+
+### 11.2 Inter-source (cross-dataset) relations
+
+| # | From (subject) | Relation | To (object) | Field on disk | Direction / reliability | Count |
+|---|---|---|---|---|---|---|
+| 1 | CVE | `HasWeakness` | CWE | `vulnerability.x_nvd_weaknesses` | structured, CVE→CWE | one list per CVE |
+| 2 | CWE | `ExemplifiedBy` | CVE | `weakness.ObservedExamples.ObservedExample[].Reference` | structured, CWE→CVE (concrete instances, not categorical) | 3,126 of 3,134 example entries across 582/969 weaknesses |
+| 3 | CWE | `RelatedTo` | CAPEC | `weakness.RelatedAttackPatterns.RelatedAttackPattern[].CAPEC_ID` | structured, CWE→CAPEC | 336/969 weaknesses |
+| 4 | CAPEC | `RelatedTo` | CWE | `attack-pattern.external_references[source_name="cwe"]` | structured, CAPEC→CWE (denser direction) | 1,214 refs across 615 attack-patterns |
+| 5 | CAPEC | `CorrespondsTo` | ATT&CK Technique | `attack-pattern.external_references[source_name="ATTACK"]` | structured, CAPEC→ATT&CK (primary direction) | 272 refs |
+| 6 | ATT&CK | `CorrespondsTo` | CAPEC | `attack-pattern.external_references[source_name="capec"]` | structured, ATT&CK→CAPEC (sparser — prefer #5) | 36 refs |
+| 7 | D3FEND Weakness | `MapsTo` | CWE | `weakness.d3f:cwe-id` | structured, 1:1 by construction | 943/943 |
+| 8 | D3FEND OffensiveTechnique | `MapsTo` | ATT&CK Technique | `offensive-technique.d3f:attack-id` | structured, exact `T####[.###]` string match | 835/835 |
+| 9 | D3FEND Technique | `<def_artifact_rel verb>` | D3FEND Artifact | `mappings.def_tech` / `def_artifact` / `def_artifact_rel` | structured, 0 orphans verified | 14,003 rows, 34 distinct verbs |
+| 10 | D3FEND Technique | `Enables` | D3FEND Tactic | `mappings.def_tech` / `def_tactic` | structured, constant verb | 14,003 rows |
+| 11 | ATT&CK Technique | `<off_artifact_rel verb>` | D3FEND Artifact | `mappings.off_tech_id` / `off_artifact` / `off_artifact_rel` | structured, 0 orphans verified | 14,003 rows, 33 distinct verbs |
+| 12 | ATT&CK Technique | `Enables` | D3FEND Tactic | `mappings.off_tech_id` / `off_tactic` | structured, constant verb | 14,003 rows |
+| 13 | D3FEND Technique | `Counters` | ATT&CK Technique | derived: co-occurrence of `def_tech` + `off_tech` in the same `mappings` row | structured but **synthetic** (D3FEND doesn't state it as one field — you derive it) | up to 14,003 pairs (149 × 325 distinct entities involved) |
+| 14 | ATT&CK object (any type) | `Mentions` | CVE | free text in `description` / `external_references` | **unstructured — regex/IE required, not a JSON field** | 175 distinct CVE ids across 167+229 hits |
+| 15 | CAPEC AttackPattern | `Mentions` | CVE | free text in `description` / `x_capec_example_instances` | **unstructured — regex/IE required** | 59 distinct CVE ids |
+
+### 11.3 Confirmed absent (don't spend time looking for these)
+
+| From | To | Status |
+|---|---|---|
+| ATT&CK | CWE | No structured field anywhere; a `CWE-\d+` regex over all of `enterprise/latest.json` returns 0 matches. Only reachable transitively via D3FEND (ATT&CK → D3FEND offensive-technique → D3FEND mapping → D3FEND weakness → CWE). |
+| D3FEND | CAPEC | No field anywhere. Only reachable transitively via CWE (D3FEND weakness → CWE → CAPEC). |
+| D3FEND `technique`/`tactic`/`artifact` (fetched standalone) | each other | No relation fields outside `mappings` — ingest those three domains expecting disconnected vocabularies unless `mappings` is also loaded. |
+| CVE | CVE | No CVE-to-CVE relation of any kind exists in this data. |
+
+### 11.4 id-format normalization required before joining (see §7.8 for the full explanation)
+
+| id | prefixed form seen in | bare form seen in |
+|---|---|---|
+| CWE id | CVE's `x_nvd_weaknesses`, D3FEND's `d3f:cwe-id`, CAPEC's `external_references[source_name="cwe"]` (`"CWE-79"`) | CWE's own `RelatedAttackPattern`/`HasMember`-style fields, sometimes bare `"79"` |
+| CAPEC id | CAPEC's own `external_references` (`"CAPEC-85"`) | CWE's `RelatedAttackPattern.CAPEC_ID` (bare `"85"`) |
+| ATT&CK technique id | consistent everywhere (`"T1055.001"`) in ATT&CK's own `external_id`, CAPEC's `ATTACK`-source refs, and D3FEND's `d3f:attack-id`/`off_tech_id` | — no normalization needed for this one |
