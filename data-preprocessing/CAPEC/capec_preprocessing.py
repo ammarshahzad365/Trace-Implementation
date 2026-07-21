@@ -1,7 +1,7 @@
 """CAPEC field-projection preprocessor.
 
 Reads the raw STIX 2.1 bundle produced by the CAPEC crawler
-(`data-acquisition/CAPEC/latest.json`) and writes four trimmed JSON files.
+(`data-acquisition/CAPEC/latest.json`) and writes five trimmed JSON files.
 `identity` and `marking-definition` objects are dropped entirely -- they're
 pure STIX attribution/marking boilerplate, not domain content.
 
@@ -14,6 +14,23 @@ pure STIX attribution/marking boilerplate, not domain content.
   `mitigates` edges.
 - its `reference_from_CAPEC` / `OWASP Attacks` / `WASC` entries (bibliographic
   citations, no local entity) are dropped entirely, not stored anywhere.
+
+`x_capec_status` and `x_capec_execution_flow` are dropped with no
+replacement. The attack-pattern-to-attack-pattern ref fields
+(`x_capec_child_of_refs`/`x_capec_parent_of_refs`,
+`x_capec_can_precede_refs`/`x_capec_can_follow_refs`,
+`x_capec_peer_of_refs`) and `x_capec_alternate_terms` are likewise removed
+from attack_patterns.json and instead become STIX-shaped relationship
+records in `attack_pattern_relationships.json`:
+- `child_of`/`parent_of` and `can_precede`/`can_follow` are each perfectly
+  reciprocal pairs in the source data, so only one direction is emitted
+  (`child_of`, `can_precede`) to avoid storing every edge twice.
+- `peer_of` is symmetric but *not* consistently reciprocal in the source
+  data, so it's deduplicated to one edge per unordered pair (canonical
+  direction: lower capec_id -> higher capec_id).
+- `x_capec_alternate_terms` becomes `also_known_as` edges where `target_ref`
+  is the alias text itself (there's no other entity for an alias to point
+  at).
 """
 
 from __future__ import annotations
@@ -31,9 +48,7 @@ ATTACK_PATTERN_FIELDS: Tuple[str, ...] = (
     "description",
     "type",
     "x_capec_abstraction",
-    "x_capec_status",
     "x_capec_domains",
-    "x_capec_child_of_refs",
     "x_capec_prerequisites",
     "x_capec_typical_severity",
     "x_capec_consequences",
@@ -41,13 +56,7 @@ ATTACK_PATTERN_FIELDS: Tuple[str, ...] = (
     "x_capec_skills_required",
     "x_capec_resources_required",
     "x_capec_example_instances",
-    "x_capec_execution_flow",
-    "x_capec_parent_of_refs",
     "x_capec_extended_description",
-    "x_capec_can_precede_refs",
-    "x_capec_can_follow_refs",
-    "x_capec_alternate_terms",
-    "x_capec_peer_of_refs",
 )
 
 COURSE_OF_ACTION_FIELDS: Tuple[str, ...] = (
@@ -81,11 +90,25 @@ EXTERNAL_RELATIONSHIP_TYPE = "related-to"
 
 EXTERNAL_RELATIONSHIP_KEY = "external-relationship"
 
+# x_capec_*_refs field -> relationship_type for the one direction of each pair that's kept
+# (the other direction -- parent_of/can_follow -- is a verified-reciprocal inverse, so it's
+# dropped rather than stored twice).
+HIERARCHY_REF_FIELDS: Dict[str, str] = {
+    "x_capec_child_of_refs": "child_of",
+    "x_capec_can_precede_refs": "can_precede",
+}
+
+PEER_OF_RELATIONSHIP_TYPE = "peer_of"
+ALSO_KNOWN_AS_RELATIONSHIP_TYPE = "also_known_as"
+
+ATTACK_PATTERN_RELATIONSHIP_KEY = "attack-pattern-relationship"
+
 OUTPUT_FILENAMES: Dict[str, str] = {
     "attack-pattern": "attack_patterns.json",
     "course-of-action": "courses_of_action.json",
     "relationship": "relationships.json",
     EXTERNAL_RELATIONSHIP_KEY: "external_relationships.json",
+    ATTACK_PATTERN_RELATIONSHIP_KEY: "attack_pattern_relationships.json",
 }
 
 
@@ -114,17 +137,18 @@ def extract_capec_id(obj: Dict[str, Any]) -> int:
     raise ParseError(f"attack-pattern {obj.get('id')} has no 'capec' external_reference")
 
 
-def make_external_relationship(source_ref: str, target_ref: str, source_name: str) -> Dict[str, Any]:
-    seed = f"capec-preprocessing:{source_ref}|{EXTERNAL_RELATIONSHIP_TYPE}|{target_ref}"
+def make_relationship(source_ref: str, target_ref: str, relationship_type: str, **extra: Any) -> Dict[str, Any]:
+    seed = f"capec-preprocessing:{source_ref}|{relationship_type}|{target_ref}"
     relationship_uuid = uuid.uuid5(uuid.NAMESPACE_URL, seed)
-    return {
+    record: Dict[str, Any] = {
         "id": f"relationship--{relationship_uuid}",
         "type": "relationship",
-        "relationship_type": EXTERNAL_RELATIONSHIP_TYPE,
+        "relationship_type": relationship_type,
         "source_ref": source_ref,
         "target_ref": target_ref,
-        "source_name": source_name,
     }
+    record.update(extra)
+    return record
 
 
 def build_external_relationships(obj: Dict[str, Any], capec_id: int) -> List[Dict[str, Any]]:
@@ -137,7 +161,51 @@ def build_external_relationships(obj: Dict[str, Any], capec_id: int) -> List[Dic
         target_ref = ref.get("external_id")
         if not target_ref:
             continue
-        relationships.append(make_external_relationship(source_ref, target_ref, source_name))
+        relationships.append(make_relationship(source_ref, target_ref, EXTERNAL_RELATIONSHIP_TYPE, source_name=source_name))
+    return relationships
+
+
+def resolve_capec_ref(stix_id: str, id_to_capec_id: Dict[str, int]) -> str:
+    capec_id = id_to_capec_id.get(stix_id)
+    if capec_id is None:
+        raise ParseError(f"attack-pattern ref {stix_id!r} does not resolve to any known attack-pattern")
+    return f"CAPEC-{capec_id}"
+
+
+def build_hierarchy_relationships(obj: Dict[str, Any], capec_id: int, id_to_capec_id: Dict[str, int]) -> List[Dict[str, Any]]:
+    source_ref = f"CAPEC-{capec_id}"
+    relationships = []
+    for ref_field, relationship_type in HIERARCHY_REF_FIELDS.items():
+        for target_stix_id in obj.get(ref_field, []):
+            target_ref = resolve_capec_ref(target_stix_id, id_to_capec_id)
+            relationships.append(make_relationship(source_ref, target_ref, relationship_type))
+    return relationships
+
+
+def build_also_known_as_relationships(obj: Dict[str, Any], capec_id: int) -> List[Dict[str, Any]]:
+    source_ref = f"CAPEC-{capec_id}"
+    return [
+        make_relationship(source_ref, alias, ALSO_KNOWN_AS_RELATIONSHIP_TYPE)
+        for alias in obj.get("x_capec_alternate_terms", [])
+    ]
+
+
+def build_peer_relationships(attack_patterns: Sequence[Dict[str, Any]], id_to_capec_id: Dict[str, int]) -> List[Dict[str, Any]]:
+    """peer_of is symmetric but not consistently reciprocal in the source data, so dedupe
+    to one edge per unordered pair (canonical direction: lower capec_id -> higher capec_id)."""
+    seen_pairs = set()
+    relationships = []
+    for obj in attack_patterns:
+        capec_id = id_to_capec_id[obj["id"]]
+        for peer_stix_id in obj.get("x_capec_peer_of_refs", []):
+            peer_capec_id = id_to_capec_id.get(peer_stix_id)
+            if peer_capec_id is None:
+                raise ParseError(f"attack-pattern ref {peer_stix_id!r} does not resolve to any known attack-pattern")
+            pair = (min(capec_id, peer_capec_id), max(capec_id, peer_capec_id))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            relationships.append(make_relationship(f"CAPEC-{pair[0]}", f"CAPEC-{pair[1]}", PEER_OF_RELATIONSHIP_TYPE))
     return relationships
 
 
@@ -152,16 +220,22 @@ def build_attack_pattern_record(obj: Dict[str, Any], capec_id: int) -> Dict[str,
 
 
 def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    attack_patterns = [obj for obj in objects if str(obj.get("type") or "") == "attack-pattern"]
+    id_to_capec_id = {obj["id"]: extract_capec_id(obj) for obj in attack_patterns}
+
     result: Dict[str, List[Dict[str, Any]]] = {obj_type: [] for obj_type in FIELDS_BY_TYPE}
     result[EXTERNAL_RELATIONSHIP_KEY] = []
+    result[ATTACK_PATTERN_RELATIONSHIP_KEY] = build_peer_relationships(attack_patterns, id_to_capec_id)
     dropped_counts: Dict[str, int] = {}
 
     for obj in objects:
         obj_type = str(obj.get("type") or "")
         if obj_type == "attack-pattern":
-            capec_id = extract_capec_id(obj)
+            capec_id = id_to_capec_id[obj["id"]]
             result["attack-pattern"].append(build_attack_pattern_record(obj, capec_id))
             result[EXTERNAL_RELATIONSHIP_KEY].extend(build_external_relationships(obj, capec_id))
+            result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(build_hierarchy_relationships(obj, capec_id, id_to_capec_id))
+            result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(build_also_known_as_relationships(obj, capec_id))
             continue
         fields = FIELDS_BY_TYPE.get(obj_type)
         if fields is not None:
@@ -205,7 +279,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default=str(default_output_dir),
         help=(
             "Directory to write attack_patterns.json / courses_of_action.json / "
-            f"relationships.json / external_relationships.json (default: {default_output_dir})"
+            "relationships.json / external_relationships.json / "
+            f"attack_pattern_relationships.json (default: {default_output_dir})"
         ),
     )
     return parser.parse_args(argv)
@@ -225,7 +300,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{counts['attack-pattern']} attack-patterns, "
             f"{counts['course-of-action']} courses-of-action, "
             f"{counts['relationship']} relationships, "
-            f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external relationships "
+            f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external relationships, "
+            f"{counts[ATTACK_PATTERN_RELATIONSHIP_KEY]} attack-pattern relationships "
             f"to {output_dir}"
         )
         return 0
