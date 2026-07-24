@@ -5,14 +5,18 @@ Reads the raw JSON bundle produced by the CWE crawler
 Unlike CAPEC's source bundle, CWE's own JSON is a generic XML-to-JSON
 conversion, not native STIX -- every relationship-shaped field
 (`RelatedWeaknesses`, `RelatedAttackPatterns`, `AlternateTerms`,
-`ObservedExamples`, `TaxonomyMappings`, `Relationships.HasMember`,
-`Members.HasMember`) lives inline on the entity record itself. This script
-extracts each of those into STIX-shaped `relationship` records (`id`, `type`,
-`relationship_type`, `source_ref`, `target_ref`, plus a few relationship-
-specific attributes) and drops the source field from the entity record, so
-entities and relationships are stored completely separately -- mirroring
-`capec_preprocessing.py`'s own `relationships.json` / `external_relationships
-.json` split.
+`ObservedExamples`, `Relationships.HasMember`, `Members.HasMember`) lives
+inline on the entity record itself. This script extracts each of those into
+STIX-shaped `relationship` records (`id`, `type`, `relationship_type`,
+`source_ref`, `target_ref`, plus a few relationship-specific attributes) and
+drops the source field from the entity record, so entities and relationships
+are stored completely separately -- mirroring `capec_preprocessing.py`'s own
+`relationships.json` / `external_relationships.json` split.
+
+`external_relationships.json` is scoped to CAPEC and CVE only -- other
+external taxonomies referenced by `TaxonomyMappings`/`ObservedExamples`
+(7 Pernicious Kingdoms, Software Fault Patterns, OWASP Top Ten, etc.) are
+not extracted.
 
 `PotentialMitigations` and `DetectionMethods` are left as embedded attributes
 on `weakness` records, not extracted -- most entries have no stable id in the
@@ -210,6 +214,8 @@ def build_related_attack_pattern_relationships(obj: Dict[str, Any]) -> List[Dict
 
 
 def build_observed_example_relationships(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """CVE-only: ObservedExample references that aren't a CVE ID (plain `ref`)
+    are dropped, since external_relationships.json is scoped to CVE/CAPEC."""
     source_ref = f"CWE-{obj['cwe_id']}"
     relationships = []
     for item in as_list(obj.get("ObservedExamples", {}).get("ObservedExample")):
@@ -217,33 +223,13 @@ def build_observed_example_relationships(obj: Dict[str, Any]) -> List[Dict[str, 
         if not raw_ref:
             continue
         target_ref = raw_ref.strip("[]")
-        source_name = "cve" if target_ref.startswith("CVE") else "ref"
-        extra: Dict[str, Any] = {"source_name": source_name}
+        if not target_ref.startswith("CVE"):
+            continue
+        extra: Dict[str, Any] = {"source_name": "cve"}
         if item.get("Description"):
             extra["description"] = item["Description"]
         if item.get("Link"):
             extra["link"] = item["Link"]
-        relationships.append(make_relationship(source_ref, target_ref, EXTERNAL_RELATIONSHIP_TYPE, **extra))
-    return relationships
-
-
-def build_taxonomy_mapping_relationships(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
-    source_ref = f"CWE-{obj['cwe_id']}"
-    relationships = []
-    for item in as_list(obj.get("TaxonomyMappings", {}).get("TaxonomyMapping")):
-        taxonomy_name = item.get("Taxonomy_Name")
-        entry_id = item.get("EntryID")
-        entry_name = item.get("EntryName")
-        if not taxonomy_name or not (entry_id or entry_name):
-            continue
-        target_ref = f"{taxonomy_name}:{entry_id or entry_name}"
-        extra: Dict[str, Any] = {"source_name": taxonomy_name}
-        if entry_id:
-            extra["entry_id"] = entry_id
-        if entry_name:
-            extra["entry_name"] = entry_name
-        if item.get("MappingFit"):
-            extra["mapping_fit"] = item["MappingFit"]
         relationships.append(make_relationship(source_ref, target_ref, EXTERNAL_RELATIONSHIP_TYPE, **extra))
     return relationships
 
@@ -269,7 +255,6 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             result[RELATIONSHIP_KEY].extend(build_also_known_as_relationships(obj))
             result[EXTERNAL_RELATIONSHIP_KEY].extend(build_related_attack_pattern_relationships(obj))
             result[EXTERNAL_RELATIONSHIP_KEY].extend(build_observed_example_relationships(obj))
-            result[EXTERNAL_RELATIONSHIP_KEY].extend(build_taxonomy_mapping_relationships(obj))
         elif obj_type == "category":
             result[RELATIONSHIP_KEY].extend(build_has_member_relationships(obj, "Relationships"))
         elif obj_type == "view":
