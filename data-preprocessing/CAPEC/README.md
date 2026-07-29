@@ -26,14 +26,21 @@ crawler's own output) and `--output-dir` (default: this folder).
   record (most `x_capec_*` fields are optional) is simply omitted, not
   written as `null`.
 - On `attack-pattern` records, `external_references` is not kept verbatim:
-  - its `source_name == "capec"` entry (always exactly one) becomes a
-    plain `capec_id` integer attribute (e.g. `CAPEC-219` → `capec_id: 219`)
-    instead of a nested reference object.
+  - its `source_name == "capec"` entry (always exactly one) determines the
+    record's own `id`: attack-patterns are keyed by `CAPEC-N` (e.g.
+    `CAPEC-219`) everywhere in this project's output — the record's
+    original STIX id is kept alongside as `stix_id`, not used as the join
+    key for anything.
   - its `cwe` / `ATTACK` entries become STIX-shaped relationship records in
     `external_relationships.json` instead.
   - its `reference_from_CAPEC` / `OWASP Attacks` / `WASC` entries
     (bibliographic citations, no local entity) are dropped entirely, not
     stored anywhere.
+- `relationship` records (native STIX `mitigates` edges) keep their own
+  STIX `id`, but any `source_ref`/`target_ref` pointing at an
+  attack-pattern is rewritten to that attack-pattern's `CAPEC-N` id.
+  `course-of-action` endpoints are left as their STIX id — CAPEC's data has
+  no human-readable numbering for mitigations, only for attack-patterns.
 - Also drops `x_capec_status` and `x_capec_execution_flow` from
   `attack-pattern` records entirely, with no replacement.
 - The attack-pattern-to-attack-pattern ref fields (`x_capec_child_of_refs`/
@@ -64,8 +71,8 @@ Five JSON files, each a plain array of trimmed records:
 
 | File | Count | Contents |
 |---|---|---|
-| `attack_patterns.json` | 615 | CAPEC attack patterns — id, capec_id, name, description, type, and the remaining `x_capec_*` analytic fields (abstraction, domains, prerequisites, typical severity, consequences, likelihood of attack, skills/resources required, example instances, extended description) |
-| `courses_of_action.json` | 877 | Mitigations — id, name, description, type only (CAPEC's own `name` for these is a generic placeholder, not a real title) |
-| `relationships.json` | 1,172 | `course-of-action --mitigates--> attack-pattern` edges — id, type, relationship_type, source_ref, target_ref, created |
+| `attack_patterns.json` | 615 | CAPEC attack patterns — id (`CAPEC-N`), stix_id, name, description, type, and the remaining `x_capec_*` analytic fields (abstraction, domains, prerequisites, typical severity, consequences, likelihood of attack, skills/resources required, example instances, extended description) |
+| `courses_of_action.json` | 877 | Mitigations — id (STIX id — CAPEC has no human-readable numbering for mitigations), name, description, type only (CAPEC's own `name` for these is a generic placeholder, not a real title) |
+| `relationships.json` | 1,172 | `course-of-action --mitigates--> attack-pattern` edges — id, type, relationship_type, source_ref (course-of-action STIX id), target_ref (`CAPEC-N`), created |
 | `external_relationships.json` | 1,486 | `CAPEC-N --related-to--> CWE-N` / `--related-to--> T####` edges, derived from each attack-pattern's `cwe`/`ATTACK` external_references — id, type, relationship_type, source_ref, target_ref, source_name (`cwe` or `ATTACK`) |
 | `attack_pattern_relationships.json` | 739 | Attack-pattern-to-attack-pattern edges derived from the removed `x_capec_*_refs`/`x_capec_alternate_terms` fields — id, type, relationship_type, source_ref, target_ref. `relationship_type` is one of `child_of` (533), `can_precede` (162), `peer_of` (17, deduped per unordered pair), `also_known_as` (27, `target_ref` is the alias text) |

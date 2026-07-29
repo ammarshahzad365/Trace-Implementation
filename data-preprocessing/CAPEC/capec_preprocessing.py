@@ -6,14 +6,22 @@ Reads the raw STIX 2.1 bundle produced by the CAPEC crawler
 pure STIX attribution/marking boilerplate, not domain content.
 
 `external_references` is not kept verbatim on attack-pattern records:
-- its `source_name == "capec"` entry (always exactly one) becomes a plain
-  `capec_id` integer attribute instead of a nested reference object.
+- its `source_name == "capec"` entry (always exactly one) determines the
+  record's own `id`: attack-patterns are keyed by `CAPEC-N` (e.g.
+  `CAPEC-85`) everywhere in this project's output, not by their STIX id.
+  The original STIX id is kept alongside as `stix_id`.
 - its `cwe` / `ATTACK` entries become STIX-shaped relationship records in a
   separate `external_relationships.json` (`CAPEC-N --related-to--> CWE-N` /
   `--related-to--> T####`), the same shape as `relationships.json`'s
   `mitigates` edges.
 - its `reference_from_CAPEC` / `OWASP Attacks` / `WASC` entries (bibliographic
   citations, no local entity) are dropped entirely, not stored anywhere.
+
+`relationship` objects (`relationships.json`) keep their own native STIX
+`id`, but any `source_ref`/`target_ref` that points at an attack-pattern is
+rewritten from that attack-pattern's STIX id to its `CAPEC-N` id, so every
+reference to a CAPEC attack-pattern anywhere in this project's output uses
+the same `CAPEC-N` key.
 
 `x_capec_status` and `x_capec_execution_flow` are dropped with no
 replacement. The attack-pattern-to-attack-pattern ref fields
@@ -172,6 +180,14 @@ def resolve_capec_ref(stix_id: str, id_to_capec_id: Dict[str, int]) -> str:
     return f"CAPEC-{capec_id}"
 
 
+def remap_attack_pattern_ref(ref: str, id_to_capec_id: Dict[str, int]) -> str:
+    """Rewrite a relationship endpoint from an attack-pattern's STIX id to its CAPEC-N id.
+    Endpoints that aren't a known attack-pattern STIX id (e.g. a course-of-action) pass
+    through unchanged."""
+    capec_id = id_to_capec_id.get(ref)
+    return f"CAPEC-{capec_id}" if capec_id is not None else ref
+
+
 def build_hierarchy_relationships(obj: Dict[str, Any], capec_id: int, id_to_capec_id: Dict[str, int]) -> List[Dict[str, Any]]:
     source_ref = f"CAPEC-{capec_id}"
     relationships = []
@@ -212,10 +228,12 @@ def build_peer_relationships(attack_patterns: Sequence[Dict[str, Any]], id_to_ca
 def build_attack_pattern_record(obj: Dict[str, Any], capec_id: int) -> Dict[str, Any]:
     record: Dict[str, Any] = {}
     for field in ATTACK_PATTERN_FIELDS:
+        if field == "id":
+            record["id"] = f"CAPEC-{capec_id}"
+            record["stix_id"] = obj["id"]
+            continue
         if field in obj:
             record[field] = obj[field]
-        if field == "id":
-            record["capec_id"] = capec_id
     return record
 
 
@@ -236,6 +254,12 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             result[EXTERNAL_RELATIONSHIP_KEY].extend(build_external_relationships(obj, capec_id))
             result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(build_hierarchy_relationships(obj, capec_id, id_to_capec_id))
             result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(build_also_known_as_relationships(obj, capec_id))
+            continue
+        if obj_type == "relationship":
+            record = filter_object(obj, RELATIONSHIP_FIELDS)
+            record["source_ref"] = remap_attack_pattern_ref(record["source_ref"], id_to_capec_id)
+            record["target_ref"] = remap_attack_pattern_ref(record["target_ref"], id_to_capec_id)
+            result["relationship"].append(record)
             continue
         fields = FIELDS_BY_TYPE.get(obj_type)
         if fields is not None:
