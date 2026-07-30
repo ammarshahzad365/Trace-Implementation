@@ -145,8 +145,8 @@ and every relationship endpoint (native, derived, and external) resolves.
     → analytic).
   - `x-mitre-analytic.x_mitre_log_source_references[].x_mitre_data_component_ref`
     → `derived_relationships.json`, `uses_data_component` edges (analytic
-    → data-component), with the log source's `name`/`channel` kept as edge
-    attributes (`log_source_name`/`channel`).
+    → data-component), with the log source kept as an edge attribute
+    (`log_source_ref`, a `log_sources.json` id) alongside `channel`.
   - `x-mitre-data-component.x_mitre_log_sources[].name` →
     `derived_relationships.json`, `has_log_source` edges (data-component →
     log-source), with `channel` as an edge attribute — see the nesting
@@ -198,10 +198,16 @@ different things:
   `has_log_source` edges.** `name` is a genuine shared vocabulary — 351
   distinct colon-namespaced codes (`WinEventLog:Security`, `AWS:CloudTrail`,
   `macos:unifiedlog`) reused across many components — so it earns its own
-  entity type. That also retroactively fixes a modeling gap: the
-  `log_source_name` already carried on 5,042 `uses_data_component` edges was a
-  bare string with no node behind it, and now resolves to a real entity (all
-  309 names used there are among the 351; verified 0 dangling). `channel` stays
+  entity type. That also retroactively fixes a modeling gap: the log source
+  already carried on 5,042 `uses_data_component` edges was a bare string with
+  no node behind it, and is now a `log_source_ref` resolving to a real entity
+  (all 309 names used there are among the 351; verified 0 dangling). A log
+  source's `id` is its name prefixed with its type — `log-source--AWS:CloudTrail`
+  — because 7 of the 351 names are bare words (`File`, `Process`, `Network`,
+  `Command`, `Certificate`, `Firmware`, `Metadata`) that D3FEND also uses as
+  artifact ids; unprefixed, those would be the only ids in the whole project
+  claimed by two different entity files. The bare name stays on the record as
+  `name`. `channel` stays
   an *edge* attribute rather than joining the log source's identity — 43% of
   its values run past 60 characters of analyst prose (`"Unusual kinit or klist
   activity"`), so it's a note about this component's use of that log source,
@@ -250,7 +256,7 @@ Seventeen JSON files, each a plain array of records:
 | `data_components.json` | 123 | Log data components (`x-mitre-data-component`) — id, stix_id, name, description |
 | `data_sources.json` | 42 | Log data sources (`x-mitre-data-source`) — id, stix_id, name, description, collection layers, platforms |
 | `assets.json` | 18 | ICS physical/logical assets (`x-mitre-asset`) — id, stix_id, name, description, platforms, sectors |
-| `log_sources.json` | 351 | Log sources (`type: "log-source"`) — id, name (both the log-source code, e.g. `WinEventLog:Security`). Synthesized from data components' embedded log-source maps; no STIX object of its own, hence no `stix_id` |
+| `log_sources.json` | 351 | Log sources (`type: "log-source"`) — id (`log-source--WinEventLog:Security`), name (the bare code). Synthesized from data components' embedded log-source maps; no STIX object of its own, hence no `stix_id` |
 | `relationships.json` | 24,552 | Native STIX edges — `uses` (19,988), `mitigates` (2,017), `detects` (918), `targets` (842, technique → ICS asset), `subtechnique-of` (542), `revoked-by` (218), `attributed-to` (27) |
 | `derived_relationships.json` | 11,758 | Edges rebuilt from embedded id-list fields — `uses_data_component` (5,042, analytic → data-component), `has_log_source` (3,165, data-component → log-source), `has_analytic` (2,066, detection-strategy → analytic), `has_tactic` (1,446, technique → tactic), `has_member` (39, matrix → tactic) |
 | `external_relationships.json` | 36 | `T#### --related-to--> CAPEC-N` edges, `source_name: "capec"` |

@@ -39,6 +39,12 @@ records in `attack_pattern_relationships.json`:
 - `x_capec_alternate_terms` becomes `also_known_as` edges where `target_ref`
   is the alias text itself (there's no other entity for an alias to point
   at).
+
+`x_capec_consequences` and `x_capec_skills_required` are the only two fields
+in CAPEC's output that were maps rather than scalars/scalar lists -- illegal
+as Neo4j properties -- so both are unpacked into their own entity files plus
+edges. See `build_consequence_relationships()` and
+`build_skill_relationships()`.
 """
 
 from __future__ import annotations
@@ -48,8 +54,10 @@ import json
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+# x_capec_consequences / x_capec_skills_required are extracted to their own
+# entities + edges rather than kept here -- both were maps. See module docstring.
 ATTACK_PATTERN_FIELDS: Tuple[str, ...] = (
     "id",
     "name",
@@ -59,9 +67,7 @@ ATTACK_PATTERN_FIELDS: Tuple[str, ...] = (
     "x_capec_domains",
     "x_capec_prerequisites",
     "x_capec_typical_severity",
-    "x_capec_consequences",
     "x_capec_likelihood_of_attack",
-    "x_capec_skills_required",
     "x_capec_resources_required",
     "x_capec_example_instances",
     "x_capec_extended_description",
@@ -108,12 +114,29 @@ HIERARCHY_REF_FIELDS: Dict[str, str] = {
 
 PEER_OF_RELATIONSHIP_TYPE = "peer_of"
 ALSO_KNOWN_AS_RELATIONSHIP_TYPE = "also_known_as"
+HAS_CONSEQUENCE_RELATIONSHIP_TYPE = "has_consequence"
+REQUIRES_SKILL_RELATIONSHIP_TYPE = "requires_skill"
 
 ATTACK_PATTERN_RELATIONSHIP_KEY = "attack-pattern-relationship"
+
+# Deliberately the same `type` value (and the same {scope, impact} shape) CWE's own
+# preprocessor emits: a consequence means the same thing in both catalogs, so both
+# should land under one Neo4j label. The node *ids* are still per-catalog, so the 4
+# (scope, impact) pairs the two vocabularies share become one node each per catalog
+# rather than a single shared node -- these preprocessors run independently and
+# can't coordinate a joint id space.
+CONSEQUENCE_ENTITY_TYPE = "consequence"
+SKILL_LEVEL_ENTITY_TYPE = "skill-level"
+
+# CAPEC writes the Access Control scope with an underscore where CWE writes a space;
+# normalized to CWE's spelling so the 9 scope values are one shared vocabulary.
+CONSEQUENCE_SCOPE_ALIASES: Dict[str, str] = {"Access_Control": "Access Control"}
 
 OUTPUT_FILENAMES: Dict[str, str] = {
     "attack-pattern": "attack_patterns.json",
     "course-of-action": "courses_of_action.json",
+    CONSEQUENCE_ENTITY_TYPE: "consequences.json",
+    SKILL_LEVEL_ENTITY_TYPE: "skill_levels.json",
     "relationship": "relationships.json",
     EXTERNAL_RELATIONSHIP_KEY: "external_relationships.json",
     ATTACK_PATTERN_RELATIONSHIP_KEY: "attack_pattern_relationships.json",
@@ -206,6 +229,77 @@ def build_also_known_as_relationships(obj: Dict[str, Any], capec_id: int) -> Lis
     ]
 
 
+def split_impact(value: str) -> Tuple[str, Optional[str]]:
+    """Split CAPEC's impact string into its short code and its trailing note.
+
+    CAPEC glues a per-attack-pattern explanation onto the impact code in
+    parentheses -- "Execute Unauthorized Commands (The attacker may be able to
+    ...)". Splitting them collapses 134 distinct strings down to the 10 real impact
+    codes (4 of which CWE uses verbatim) and puts the explanation on the edge, which
+    is where CWE already keeps its own consequence `note`. Verified against the full
+    bundle: no impact code contains a parenthesis, and every parenthetical closes at
+    the end of the string, so this split is unambiguous.
+    """
+    index = value.find(" (")
+    if index < 0 or not value.rstrip().endswith(")"):
+        return value, None
+    return value[:index], value[index + 2:].rstrip()[:-1]
+
+
+def build_consequence_relationships(
+    obj: Dict[str, Any],
+    capec_id: int,
+    consequence_ids: Dict[Tuple[str, str], str],
+    consequences: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Unpack `x_capec_consequences` (a scope -> impact-list map) into one edge per
+    (scope, impact) pair, pointing at a `consequence` entity shared across every
+    attack pattern that has the same pair."""
+    source_ref = f"CAPEC-{capec_id}"
+    relationships = []
+    seen = set()
+    for raw_scope, impacts in (obj.get("x_capec_consequences") or {}).items():
+        scope = CONSEQUENCE_SCOPE_ALIASES.get(raw_scope, raw_scope)
+        for raw_impact in impacts:
+            impact, note = split_impact(raw_impact)
+            if (scope, impact, note) in seen:
+                continue  # one attack pattern lists the same pair twice upstream
+            seen.add((scope, impact, note))
+            key = (scope, impact)
+            entity_id = consequence_ids.get(key)
+            if entity_id is None:
+                entity_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"capec-preprocessing:{CONSEQUENCE_ENTITY_TYPE}:scope={scope}|impact={impact}")
+                entity_id = f"{CONSEQUENCE_ENTITY_TYPE}--{entity_uuid}"
+                consequence_ids[key] = entity_id
+                # scope/impact are lists of one to match CWE's consequence records,
+                # which can carry several of each
+                consequences.append({"id": entity_id, "type": CONSEQUENCE_ENTITY_TYPE, "scope": [scope], "impact": [impact]})
+            extra = {"note": note} if note else {}
+            relationships.append(make_relationship(source_ref, entity_id, HAS_CONSEQUENCE_RELATIONSHIP_TYPE, **extra))
+    return relationships
+
+
+def build_skill_relationships(
+    obj: Dict[str, Any], capec_id: int, skill_levels: Dict[str, str]
+) -> List[Dict[str, Any]]:
+    """Unpack `x_capec_skills_required` (a level -> prose map) into edges pointing at
+    one of three `skill-level` entities, with the prose as an edge attribute.
+
+    Unlike ATT&CK's mutable elements -- where the map keys were a 2,892-value
+    long tail not worth nodes -- the keys here are a closed 3-value enum
+    (Low/Medium/High), so promoting them makes "every attack pattern needing high
+    skill" a one-hop query. The prose is per-attack-pattern, so it goes on the edge.
+    """
+    source_ref = f"CAPEC-{capec_id}"
+    relationships = []
+    for level, prose in (obj.get("x_capec_skills_required") or {}).items():
+        entity_id = f"{SKILL_LEVEL_ENTITY_TYPE}--{level}"
+        skill_levels[level] = entity_id
+        extra = {"description": prose} if str(prose or "").strip() else {}
+        relationships.append(make_relationship(source_ref, entity_id, REQUIRES_SKILL_RELATIONSHIP_TYPE, **extra))
+    return relationships
+
+
 def build_peer_relationships(attack_patterns: Sequence[Dict[str, Any]], id_to_capec_id: Dict[str, int]) -> List[Dict[str, Any]]:
     """peer_of is symmetric but not consistently reciprocal in the source data, so dedupe
     to one edge per unordered pair (canonical direction: lower capec_id -> higher capec_id)."""
@@ -243,8 +337,12 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
 
     result: Dict[str, List[Dict[str, Any]]] = {obj_type: [] for obj_type in FIELDS_BY_TYPE}
     result[EXTERNAL_RELATIONSHIP_KEY] = []
+    result[CONSEQUENCE_ENTITY_TYPE] = []
+    result[SKILL_LEVEL_ENTITY_TYPE] = []
     result[ATTACK_PATTERN_RELATIONSHIP_KEY] = build_peer_relationships(attack_patterns, id_to_capec_id)
     dropped_counts: Dict[str, int] = {}
+    consequence_ids: Dict[Tuple[str, str], str] = {}
+    skill_levels: Dict[str, str] = {}
 
     for obj in objects:
         obj_type = str(obj.get("type") or "")
@@ -254,6 +352,10 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             result[EXTERNAL_RELATIONSHIP_KEY].extend(build_external_relationships(obj, capec_id))
             result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(build_hierarchy_relationships(obj, capec_id, id_to_capec_id))
             result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(build_also_known_as_relationships(obj, capec_id))
+            result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(
+                build_consequence_relationships(obj, capec_id, consequence_ids, result[CONSEQUENCE_ENTITY_TYPE])
+            )
+            result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(build_skill_relationships(obj, capec_id, skill_levels))
             continue
         if obj_type == "relationship":
             record = filter_object(obj, RELATIONSHIP_FIELDS)
@@ -268,6 +370,12 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
         if obj_type not in DROPPED_TYPES:
             print(f"[capec-parser] warning: skipping unexpected object type '{obj_type}'", file=sys.stderr)
         dropped_counts[obj_type] = dropped_counts.get(obj_type, 0) + 1
+
+    result[CONSEQUENCE_ENTITY_TYPE].sort(key=lambda record: record["id"])
+    result[SKILL_LEVEL_ENTITY_TYPE] = [
+        {"id": entity_id, "type": SKILL_LEVEL_ENTITY_TYPE, "name": level}
+        for level, entity_id in sorted(skill_levels.items())
+    ]
 
     dropped_summary = ", ".join(f"{count} {obj_type}" for obj_type, count in sorted(dropped_counts.items()))
     print(f"[capec-parser] parsed {len(objects)} objects; dropped {dropped_summary or 'nothing'}")
@@ -303,7 +411,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default=str(default_output_dir),
         help=(
             "Directory to write attack_patterns.json / courses_of_action.json / "
-            "relationships.json / external_relationships.json / "
+            "consequences.json / skill_levels.json / relationships.json / "
+            "external_relationships.json / "
             f"attack_pattern_relationships.json (default: {default_output_dir})"
         ),
     )
@@ -323,6 +432,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "[capec-parser] wrote "
             f"{counts['attack-pattern']} attack-patterns, "
             f"{counts['course-of-action']} courses-of-action, "
+            f"{counts[CONSEQUENCE_ENTITY_TYPE]} consequences, "
+            f"{counts[SKILL_LEVEL_ENTITY_TYPE]} skill levels, "
             f"{counts['relationship']} relationships, "
             f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external relationships, "
             f"{counts[ATTACK_PATTERN_RELATIONSHIP_KEY]} attack-pattern relationships "

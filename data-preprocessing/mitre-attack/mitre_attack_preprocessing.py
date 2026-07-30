@@ -112,6 +112,14 @@ EXTERNAL_RELATIONSHIP_KEY = "external-relationship"
 # alongside FIELDS_BY_TYPE's real STIX types rather than inside it.
 LOG_SOURCE_KEY = "log-source"
 
+# A log source's natural key is its own name, but 7 of the 351 are bare words
+# ("File", "Process", "Network", ...) that D3FEND also uses as artifact ids, so the
+# raw name would be the only id in this project claimed by two different entity
+# files. Prefixed with its type -- the same `<type>--<key>` shape CWE uses for its
+# synthesized nodes -- which keeps the name readable inside the id. The bare name
+# stays on the record as `name`.
+LOG_SOURCE_ID_PREFIX = f"{LOG_SOURCE_KEY}--"
+
 HAS_TACTIC_RELATIONSHIP_TYPE = "has_tactic"
 HAS_MEMBER_RELATIONSHIP_TYPE = "has_member"
 HAS_ANALYTIC_RELATIONSHIP_TYPE = "has_analytic"
@@ -315,9 +323,9 @@ def build_analytic_relationships(
         name = log_source.get("name")
         if name:
             # every name here is also on some data component's own x_mitre_log_sources,
-            # but register it anyway so log_source_name can never dangle
+            # but register it anyway so log_source_ref can never dangle
             log_source_names[name] = None
-            extra["log_source_name"] = name
+            extra["log_source_ref"] = LOG_SOURCE_ID_PREFIX + name
         channel = clean_channel(log_source.get("channel"))
         if channel:
             extra["channel"] = channel
@@ -347,7 +355,9 @@ def build_log_source_relationships(
         log_source_names[name] = None
         channel = clean_channel(log_source.get("channel"))
         extra = {"channel": channel} if channel else {}
-        relationships.append(make_relationship(entity_id, name, HAS_LOG_SOURCE_RELATIONSHIP_TYPE, **extra))
+        relationships.append(
+            make_relationship(entity_id, LOG_SOURCE_ID_PREFIX + name, HAS_LOG_SOURCE_RELATIONSHIP_TYPE, **extra)
+        )
     return relationships
 
 
@@ -493,7 +503,9 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
         elif obj_type == "x-mitre-data-component":
             result[DERIVED_RELATIONSHIP_KEY].extend(build_log_source_relationships(obj, final_id, log_source_names))
 
-    result[LOG_SOURCE_KEY] = [{"id": name, "type": LOG_SOURCE_KEY, "name": name} for name in sorted(log_source_names)]
+    result[LOG_SOURCE_KEY] = [
+        {"id": LOG_SOURCE_ID_PREFIX + name, "type": LOG_SOURCE_KEY, "name": name} for name in sorted(log_source_names)
+    ]
 
     dropped_summary = ", ".join(f"{count} {obj_type}" for obj_type, count in sorted(dropped_counts.items()))
     print(f"[mitre-attack-parser] parsed {len(objects)} merged objects; dropped {dropped_summary or 'nothing'}")
