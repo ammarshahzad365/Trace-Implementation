@@ -1,9 +1,12 @@
 # MITRE D3FEND Preprocessing
 
-Trims the six raw JSON files from the D3FEND crawler
+Trims five of the six raw JSON files from the D3FEND crawler
 (`data-acquisition/mitre-defend/{techniques,tactics,artifacts,weaknesses,
-offensive-techniques,mappings}/latest.json`) down to five entity files plus
-one `relationships.json`.
+mappings}/latest.json`) down to three entity files (`techniques.json`,
+`tactics.json`, `artifacts.json`) plus one `relationships.json`.
+`offensive-techniques/latest.json` is crawled but not read here at all —
+see below. `weaknesses/latest.json` is read for its embedded relationships
+but no longer produces its own entity file either — see below.
 
 ## Usage
 
@@ -30,9 +33,8 @@ or `ExtendedDescription` weren't.
 JSON-LD also collapses a cardinality-1 value to a bare scalar instead of a
 one-item list — the same quirk CWE's own XML-to-JSON conversion has for
 its single-vs-list fields, normalized here the same way (`as_list()`).
-Two entity types (`tactic`, `offensive-technique`) also carry typed-literal
-values (`{"@type": "...boolean", "@value": "true"}`) for a couple of
-fields, unwrapped by `literal_value()`.
+`tactic` records also carry typed-literal values (`{"@type": "...integer",
+"@value": "3"}`) for a couple of fields, unwrapped by `literal_value()`.
 
 `_content_hash`/`_first_seen_at` are dropped from every record — this
 project's *own* crawler bookkeeping (D3FEND has no native timestamps at
@@ -43,28 +45,47 @@ its own per-type output file.
 
 ## Ids double as this dataset's own cross-references — no `external_relationships.json`
 
-D3FEND's `weakness` records are its own mirror of CWE entries (`@id`:
-`"d3f:CWE-1004"`), and its `offensive-technique` records mirror ATT&CK
-techniques (`@id`: `"d3f:T1055.001"`). Stripping the fixed `d3f:` namespace
-prefix from every `@id` — the one normalization applied uniformly across
-all five entity types — happens to produce exactly the id strings
-(`CWE-1004`, `T1055.001`) that `data-preprocessing/CWE` and
-`data-preprocessing/mitre-attack` already use for the *same* underlying
-concepts. Since the id values are literally identical strings across the
-two datasets, there's nothing for an `external_relationships.json` to
-express beyond that identity — unlike CAPEC's `CAPEC-N`/CWE's `CWE-N`,
-genuinely different id spaces for genuinely different entities referencing
-each other. **To join a D3FEND weakness/offensive-technique into the
-CWE/ATT&CK preprocessing output, match `id` directly** — no join file
-needed.
+Stripping the fixed `d3f:` namespace prefix from every `@id` — the one
+normalization applied uniformly across every entity type and every
+relationship endpoint — happens to produce exactly the id strings
+(`CWE-1004`, `T1055.001`) that `data-preprocessing/CWE`/`mitre-attack`
+already use for the same underlying concepts. Since the id values are
+literally identical strings across datasets, there's nothing for an
+`external_relationships.json` to express beyond that identity — unlike
+CAPEC's `CAPEC-N`/CWE's `CWE-N`, genuinely different id spaces for
+genuinely different entities referencing each other.
+
+**Neither `weakness` nor `offensive-technique` gets a local entity file
+anymore** — both are pure mirrors of another source in this project (CWE,
+ATT&CK), and a full check found nothing in either worth keeping separately:
+
+- All 835 `offensive-technique` ids exist in `mitre-attack/techniques.json`.
+  D3FEND's own `definition` text was consistently just a truncated prefix
+  of ATT&CK's fuller `description` (781 of 835 records) — pure data loss,
+  not distinct content — and D3FEND's copy lags ATT&CK on 5 renamed and 17
+  revoked/deprecated techniques.
+- All 943 `weakness` ids exist in `CWE/weaknesses.json`. Closer call: 97.7%
+  of `definition`s matched CWE's `Description` exactly after
+  whitespace-normalizing, but the remaining 2.3% had drifted independently
+  in both directions (D3FEND fuller in 17 cases, CWE fuller in 5), plus a
+  handful of D3FEND-only `synonyms` and a single `comment` recovering
+  content CWE's own preprocessor discards elsewhere (`Notes`). Dropped
+  anyway, accepting that small residue, for the same "match id directly"
+  reason as `offensive-technique`.
+
+So `counters` edges' offensive-technique endpoint and the D3FEND-relation
+edges to artifacts (see below) use bare `T####[.###]`-style ATT&CK ids,
+matched directly against `mitre-attack/techniques.json`'s own `id`; and
+`child_of`/`weakness_of`/`may_be_weakness_of` edges' weakness endpoint uses
+bare `CWE-N` ids, matched directly against `CWE/weaknesses.json`'s own
+`id`.
 
 Because D3FEND provides a distinct human-facing short code
-(`d3f:d3fend-id`, e.g. `D3-AMED`) for `technique` records only — not for
-`artifact`/`tactic`/`weakness`/`offensive-technique` — every relationship
-in this dataset (including ones with a `technique` endpoint) uses the
-stripped `@id` as `source_ref`/`target_ref`, not `d3fend-id`, so there's
-one consistent join key across every type. `d3fend_id` is kept as an extra
-attribute on `technique` records only.
+(`d3f:d3fend-id`, e.g. `D3-AMED`) for `technique` records only, every
+relationship in this dataset uses the stripped `@id` as `source_ref`/
+`target_ref` throughout, not `d3fend-id`, so there's one consistent join
+key across every type. `d3fend_id` is kept as an extra attribute on
+`technique` records only.
 
 ## What becomes a relationship
 
@@ -95,7 +116,9 @@ attribute on `technique` records only.
     every row it appears in).
   - `offensive-technique --{relation}--> artifact` (482 unique edges —
     `modifies`, `may_modify`, `creates`, etc.) — likewise D3FEND-only
-    information layered onto the ATT&CK technique mirror.
+    information layered onto ATT&CK's own techniques (`offensive-technique`
+    here means an ATT&CK technique id, e.g. `T1078`; there's no local
+    `offensive_techniques.json` entity for it — see above).
   - `technique --counters--> offensive-technique` (3,544 unique edges) —
     the dataset's headline fact. Kept with `def_artifact`/
     `def_artifact_rel`/`off_artifact`/`off_artifact_rel` as edge
@@ -125,13 +148,11 @@ attribute on `technique` records only.
 
 ## Output
 
-Six JSON files, each a plain array of records:
+Four JSON files, each a plain array of records:
 
 | File | Count | Contents |
 |---|---|---|
 | `techniques.json` | 271 | D3FEND defensive techniques — id, name, `d3fend_id` (e.g. `D3-AMED`), synonyms |
 | `tactics.json` | 7 | D3FEND tactics (Harden, Detect, Isolate, Deceive, Evict, Restore, Model) — id, name, definition, display order/priority |
 | `artifacts.json` | 915 | Digital artifacts from the D3FEND Artifact Ontology — id, name, definitions, synonyms, alt labels |
-| `weaknesses.json` | 943 | CWE weaknesses as mirrored into D3FEND — id (`CWE-N`, matching `data-preprocessing/CWE`), name, `cwe_id`, definition, synonyms, comment |
-| `offensive_techniques.json` | 835 | ATT&CK techniques referenced by D3FEND — id (`T####[.###]`, matching `data-preprocessing/mitre-attack`), name, `attack_id`, definition, `deprecated` (144 records) |
-| `relationships.json` | 6,471 | `counters` (3,544, technique → offensive-technique), `child_of` (1,103, weakness → weakness), `has_subclass` (995, artifact → artifact), `enables` (149, technique → tactic), 63 distinct D3FEND-relation-named edges technique/offensive-technique → artifact (648 total — `modifies` 107, `produces` 67, `may_modify` 56, `analyzes` 49, `accesses` 49, ... down to several with a single edge), `weakness_of` (26, weakness → artifact), `may_be_weakness_of` (6, weakness → artifact) |
+| `relationships.json` | 6,471 | `counters` (3,544, technique → ATT&CK technique id, e.g. `T1078` — no local entity file, join against `data-preprocessing/mitre-attack/techniques.json`), `child_of` (1,103, weakness → weakness — `CWE-N` ids, join against `data-preprocessing/CWE/weaknesses.json`), `has_subclass` (995, artifact → artifact), `enables` (149, technique → tactic), 63 distinct D3FEND-relation-named edges technique/ATT&CK-technique → artifact (648 total — `modifies` 107, `produces` 67, `may_modify` 56, `analyzes` 49, `accesses` 49, ... down to several with a single edge), `weakness_of` (26, weakness → artifact), `may_be_weakness_of` (6, weakness → artifact) |

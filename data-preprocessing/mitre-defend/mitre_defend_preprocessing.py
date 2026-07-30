@@ -1,10 +1,31 @@
 """MITRE D3FEND field-projection preprocessor.
 
-Reads the six raw JSON files produced by the D3FEND crawler
+Reads five raw JSON files produced by the D3FEND crawler
 (`data-acquisition/mitre-defend/{techniques,tactics,artifacts,weaknesses,
-offensive-techniques,mappings}/latest.json`) and writes six trimmed JSON
-files: one per entity type, plus one `relationships.json` covering every
-edge in the dataset.
+mappings}/latest.json`) and writes four trimmed JSON files: one per entity
+type (`technique`/`tactic`/`artifact`), plus one `relationships.json`
+covering every edge in the dataset. `offensive-techniques/latest.json` is
+read by the crawler but not by this script (see below); `weaknesses/
+latest.json` is read here for its embedded `child_of`/`weakness_of`/
+`may_be_weakness_of` relationships but no longer produces its own entity
+file either -- both `offensive-technique` and `weakness` records are
+mirrors of another source in this project (ATT&CK techniques, CWE
+weaknesses respectively) with no local entity file of their own anymore;
+join their relationship endpoints directly against
+`data-preprocessing/mitre-attack/techniques.json` /
+`data-preprocessing/CWE/weaknesses.json` by `id`.
+
+Both mirrors were checked before dropping: all 835 `offensive-technique`
+ids and all 943 `weakness` ids exist in their respective source. For
+`offensive-technique`, D3FEND's `definition` was consistently just a
+truncated prefix of ATT&CK's fuller `description` -- pure data loss, no
+unique content. `weakness` was closer: 97.7% of `definition`s were
+identical to CWE's `Description` after whitespace-normalizing, but the
+remainder had drifted independently in both directions (D3FEND fuller in
+17 cases, CWE fuller in 5), plus a handful of D3FEND-only `synonyms` and a
+single `comment` recovering content CWE's own preprocessor discards
+elsewhere. Dropped anyway, accepting that small residue, for the same
+"match id directly" reason as `offensive-technique`.
 
 D3FEND's own JSON is JSON-LD, not STIX -- every record is keyed by an `@id`
 like `"d3f:CWE-1004"` or `"d3f:T1055.001"`, and most fields carry an
@@ -18,10 +39,9 @@ output, unlike `x_capec_abstraction` or `ExtendedDescription`.
 
 JSON-LD also collapses a cardinality-1 value to a bare scalar instead of a
 one-item list (the same quirk CWE's XML-to-JSON conversion has for its own
-single-vs-list fields) -- `as_list()` normalizes both shapes. Two entity
-types (`tactic`, `offensive-technique`) also carry typed-literal values
-(`{"@type": "...boolean", "@value": "true"}`) for a couple of fields --
-`literal_value()` unwraps those.
+single-vs-list fields) -- `as_list()` normalizes both shapes. `tactic`
+records also carry typed-literal values (`{"@type": "...integer", "@value":
+"3"}`) for a couple of fields -- `literal_value()` unwraps those.
 
 `_content_hash`/`_first_seen_at` are dropped from every record: they're
 this project's *own* crawler bookkeeping (D3FEND has no native timestamps
@@ -32,28 +52,23 @@ already sorted into its own per-type output file.
 
 ## Ids double as this dataset's own cross-references
 
-D3FEND's `weakness` records are its own mirror of CWE entries -- an `@id`
-of `"d3f:CWE-1004"` --  and its `offensive-technique` records mirror ATT&CK
-techniques -- an `@id` of `"d3f:T1055.001"`. Stripping the fixed `d3f:`
-namespace prefix from every `@id` in this dataset (the one normalization
-applied uniformly to all five entity types) happens to produce exactly the
-same id strings (`CWE-1004`, `T1055.001`) that `data-preprocessing/CWE` and
-`data-preprocessing/mitre-attack` already use for the *same* underlying
-concepts. Given the id values are literally identical strings across the
-two datasets, there is nothing for an `external_relationships.json` to
-express beyond that identity -- unlike CAPEC's `CAPEC-N`/CWE's `CWE-N`,
-which are genuinely different id spaces for genuinely different entities
-referencing each other. So this preprocessor does **not** produce an
-`external_relationships.json`: to join a D3FEND weakness/offensive-technique
-into the CWE/ATT&CK preprocessing output, match `id` directly.
+Stripping the fixed `d3f:` namespace prefix from every `@id` (the one
+normalization applied uniformly across every entity type and every
+relationship endpoint) happens to produce exactly the id strings
+(`CWE-1004`, `T1055.001`) that `data-preprocessing/CWE`/`mitre-attack`
+already use for the same underlying concepts -- see above. Given the id
+values are literally identical strings across datasets, there's nothing
+for an `external_relationships.json` to express beyond that identity,
+unlike CAPEC's `CAPEC-N`/CWE's `CWE-N`, genuinely different id spaces for
+genuinely different entities referencing each other. So this preprocessor
+does **not** produce an `external_relationships.json`.
 
 Because D3FEND provides a distinct human-facing short code
-(`d3f:d3fend-id`, e.g. `D3-AMED`) for `technique` records only -- not for
-`artifact`/`tactic`/`weakness`/`offensive-technique` -- every relationship
-in this dataset (including ones with a `technique` endpoint) uses the
-stripped `@id` as `source_ref`/`target_ref`, not `d3fend-id`, so there's one
-consistent join key across every type. `d3fend_id` is kept as an extra
-attribute on `technique` records only, for citing D3FEND's own short code.
+(`d3f:d3fend-id`, e.g. `D3-AMED`) for `technique` records only, every
+relationship in this dataset uses the stripped `@id` as `source_ref`/
+`target_ref` throughout, not `d3fend-id`, so there's one consistent join
+key across every type. `d3fend_id` is kept as an extra attribute on
+`technique` records only, for citing D3FEND's own short code.
 
 ## What becomes a relationship
 
@@ -120,7 +135,6 @@ DOMAIN_FILES: Dict[str, str] = {
     "tactic": "tactics/latest.json",
     "artifact": "artifacts/latest.json",
     "weakness": "weaknesses/latest.json",
-    "offensive-technique": "offensive-techniques/latest.json",
     "mapping": "mappings/latest.json",
 }
 
@@ -138,8 +152,6 @@ OUTPUT_FILENAMES: Dict[str, str] = {
     "technique": "techniques.json",
     "tactic": "tactics.json",
     "artifact": "artifacts.json",
-    "weakness": "weaknesses.json",
-    "offensive-technique": "offensive_techniques.json",
     "relationship": "relationships.json",
 }
 
@@ -251,43 +263,6 @@ def build_artifact_record(raw: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
-def build_weakness_record(raw: Dict[str, Any]) -> Dict[str, Any]:
-    labels = as_list(raw.get("rdfs:label"))
-    cwe_ids = as_list(raw.get("d3f:cwe-id"))
-    record: Dict[str, Any] = {
-        "id": strip_prefix(raw["@id"]),
-        "type": "weakness",
-        "name": labels[0] if labels else None,
-    }
-    if cwe_ids:
-        record["cwe_id"] = cwe_ids[0]
-    definitions = as_list(raw.get("d3f:definition"))
-    if definitions:
-        record["definition"] = definitions[0]
-    # Alternate labels beyond the first (rare -- 4 weaknesses) are extra names, folded in with synonyms.
-    synonyms = as_list(raw.get("d3f:synonym")) + labels[1:]
-    if synonyms:
-        record["synonyms"] = synonyms
-    if raw.get("rdfs:comment"):
-        record["comment"] = raw["rdfs:comment"]
-    return record
-
-
-def build_offensive_technique_record(raw: Dict[str, Any]) -> Dict[str, Any]:
-    record: Dict[str, Any] = {
-        "id": strip_prefix(raw["@id"]),
-        "type": "offensive-technique",
-        "name": raw.get("rdfs:label"),
-    }
-    if raw.get("d3f:attack-id"):
-        record["attack_id"] = raw["d3f:attack-id"]
-    if raw.get("d3f:definition"):
-        record["definition"] = raw["d3f:definition"]
-    if literal_value(raw.get("owl:deprecated")) == "true":
-        record["deprecated"] = True
-    return record
-
-
 # --------------------------------------------------------------------------
 # Relationships from the five entity domains' own embedded ref fields
 # --------------------------------------------------------------------------
@@ -393,8 +368,6 @@ def parse(domains: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, 
         "technique": [],
         "tactic": [],
         "artifact": [],
-        "weakness": [],
-        "offensive-technique": [],
         "relationship": [],
     }
 
@@ -406,10 +379,7 @@ def parse(domains: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, 
         result["artifact"].append(build_artifact_record(raw))
         result["relationship"].extend(build_artifact_relationships(raw))
     for raw in domains["weakness"]:
-        result["weakness"].append(build_weakness_record(raw))
         result["relationship"].extend(build_weakness_relationships(raw))
-    for raw in domains["offensive-technique"]:
-        result["offensive-technique"].append(build_offensive_technique_record(raw))
 
     result["relationship"].extend(build_mapping_relationships(domains["mapping"]))
 
@@ -418,8 +388,7 @@ def parse(domains: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, 
         f"{len(domains['technique'])} techniques, "
         f"{len(domains['tactic'])} tactics, "
         f"{len(domains['artifact'])} artifacts, "
-        f"{len(domains['weakness'])} weaknesses, "
-        f"{len(domains['offensive-technique'])} offensive techniques, "
+        f"{len(domains['weakness'])} weaknesses (relationships only, no entity file), "
         f"{len(domains['mapping'])} mapping rows"
     )
     return result
@@ -471,8 +440,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{counts['technique']} techniques, "
             f"{counts['tactic']} tactics, "
             f"{counts['artifact']} artifacts, "
-            f"{counts['weakness']} weaknesses, "
-            f"{counts['offensive-technique']} offensive techniques, "
             f"{counts['relationship']} relationships "
             f"to {output_dir}"
         )
