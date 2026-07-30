@@ -118,6 +118,10 @@ and every relationship endpoint (native, derived, and external) resolves.
   kept as attributes instead, since ATT&CK's own `revoked-by` relationships
   point *at* revoked objects, and dropping them would leave those edges
   dangling.
+- `malware`/`tool` spell their alias list `x_mitre_aliases` where
+  `intrusion-set`/`campaign` use STIX's own `aliases`; the output unifies both
+  on `aliases`, which is also what CWE/CAPEC/D3FEND records call this concept
+  (the project previously had four different spellings for it).
 - `x_mitre_contributors` (write-up credit lists), `x_mitre_version`
   (ATT&CK's internal revision counter), a tactic's `x_mitre_shortname`
   (a slug of its own `name`, only ever needed internally to match

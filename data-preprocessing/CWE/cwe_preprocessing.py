@@ -86,6 +86,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -139,13 +140,33 @@ NATURE_TO_RELATIONSHIP_TYPE: Dict[str, str] = {
     "StartsWith": "starts_with",
 }
 
-ALSO_KNOWN_AS_RELATIONSHIP_TYPE = "also_known_as"
 HAS_MEMBER_RELATIONSHIP_TYPE = "has_member"
 HAS_CONSEQUENCE_RELATIONSHIP_TYPE = "has_consequence"
 APPLIES_TO_PLATFORM_RELATIONSHIP_TYPE = "applies_to_platform"
 INTRODUCED_IN_RELATIONSHIP_TYPE = "introduced_in"
 HAS_MITIGATION_RELATIONSHIP_TYPE = "has_mitigation"
 HAS_DETECTION_METHOD_RELATIONSHIP_TYPE = "has_detection_method"
+
+ALIAS_NOTE_SEPARATOR = " -- "
+
+# CWE's source XML uses PascalCase element names; every other source in this project
+# uses snake_case, so output field names are normalized to match. `Type` on a view
+# would collide with the `type` field carrying the node's own label, so it becomes
+# `view_type`.
+FIELD_NAME_OVERRIDES: Dict[str, str] = {
+    "Type": "view_type",
+    "LikelihoodOfExploit": "likelihood_of_exploit",
+    "ExtendedDescription": "extended_description",
+    "BackgroundDetails": "background_details",
+    "AffectedResources": "affected_resources",
+    "FunctionalAreas": "functional_areas",
+    "WeaknessOrdinalities": "weakness_ordinalities",
+}
+
+# A CVE id CWE references in an ObservedExample but that isn't shaped like a real
+# one (`CVE-2002-216` has a 3-digit sequence) can't resolve to anything -- dropped
+# rather than emitted as an edge to a nonexistent node.
+CVE_ID_PATTERN = re.compile(r"^CVE-\d{4}-\d{4,}$")
 
 RELATIONSHIP_KEY = "relationship"
 EXTERNAL_RELATIONSHIP_KEY = "external-relationship"
@@ -290,6 +311,18 @@ def get_or_create_entity(
     return entity_id
 
 
+def snake_case(name: str) -> str:
+    """`LikelihoodOfExploit` -> `likelihood_of_exploit`, `Name` -> `name`."""
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
+
+
+def normalize_field_names(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Rewrite this record's PascalCase source field names to snake_case, preserving
+    field order. Applied once per entity record, after every builder has finished
+    adding its own fields, so builders can keep reading source names verbatim."""
+    return {FIELD_NAME_OVERRIDES.get(key, snake_case(key)): value for key, value in record.items()}
+
+
 def build_weakness_record(obj: Dict[str, Any]) -> Dict[str, Any]:
     record = filter_object(obj, WEAKNESS_SCALAR_FIELDS)
 
@@ -322,6 +355,7 @@ def build_weakness_record(obj: Dict[str, Any]) -> Dict[str, Any]:
         if ordinalities:
             record["WeaknessOrdinalities"] = ordinalities
 
+    apply_alternate_terms(obj, record)
     return record
 
 
@@ -361,19 +395,31 @@ def build_related_weakness_relationships(obj: Dict[str, Any]) -> List[Dict[str, 
     return relationships
 
 
-def build_also_known_as_relationships(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
-    source_ref = f"CWE-{obj['cwe_id']}"
-    relationships = []
+def apply_alternate_terms(obj: Dict[str, Any], record: Dict[str, Any]) -> None:
+    """Fold `AlternateTerms` into `aliases`/`alias_notes` list properties on the weakness.
+
+    These used to be `also_known_as` edges whose `target_ref` was the alias text
+    itself -- but an alias is not an entity, so those 189 edges pointed at nothing
+    that exists, and loading them would have invented a phantom node per alias
+    string. As plain list properties they say the same thing without the phantoms,
+    and they line up with the `aliases` property ATT&CK/CAPEC/D3FEND records carry
+    for the same concept. 105 of the terms have an accompanying note, kept as
+    self-labelling "term -- note" strings (the same shape analytics' mutable-element
+    notes use) rather than a second index-aligned list.
+    """
+    terms, notes = [], []
     for item in as_list(obj.get("AlternateTerms", {}).get("AlternateTerm")):
         term = item.get("Term")
         if not term:
             continue
-        extra: Dict[str, Any] = {}
-        description = flatten_xhtml(item.get("Description"))
-        if description:
-            extra["description"] = description
-        relationships.append(make_relationship(source_ref, term, ALSO_KNOWN_AS_RELATIONSHIP_TYPE, **extra))
-    return relationships
+        terms.append(term)
+        note = flatten_xhtml(item.get("Description"))
+        if note:
+            notes.append(f"{term}{ALIAS_NOTE_SEPARATOR}{note}")
+    if terms:
+        record["aliases"] = list(dict.fromkeys(terms))
+    if notes:
+        record["alias_notes"] = notes
 
 
 def build_has_member_relationships(obj: Dict[str, Any], members_field: str) -> List[Dict[str, Any]]:
@@ -413,6 +459,9 @@ def build_observed_example_relationships(obj: Dict[str, Any]) -> List[Dict[str, 
             continue
         target_ref = raw_ref.strip("[]")
         if not target_ref.startswith("CVE"):
+            continue
+        if not CVE_ID_PATTERN.match(target_ref):
+            print(f"[cwe-parser] warning: CWE-{obj['cwe_id']} ObservedExample {target_ref!r} is not a well-formed CVE id -- dropped", file=sys.stderr)
             continue
         extra: Dict[str, Any] = {"source_name": "cve"}
         if item.get("Description"):
@@ -604,9 +653,8 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             continue
 
         if obj_type == "weakness":
-            result["weakness"].append(build_weakness_record(obj))
+            result["weakness"].append(normalize_field_names(build_weakness_record(obj)))
             result[RELATIONSHIP_KEY].extend(build_related_weakness_relationships(obj))
-            result[RELATIONSHIP_KEY].extend(build_also_known_as_relationships(obj))
             result[RELATIONSHIP_KEY].extend(build_consequence_relationships(obj, dedup_registry, result))
             result[RELATIONSHIP_KEY].extend(build_platform_relationships(obj, dedup_registry, result))
             result[RELATIONSHIP_KEY].extend(build_introduction_relationships(obj, dedup_registry, result))
@@ -615,10 +663,10 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             result[EXTERNAL_RELATIONSHIP_KEY].extend(build_related_attack_pattern_relationships(obj))
             result[EXTERNAL_RELATIONSHIP_KEY].extend(build_observed_example_relationships(obj))
         elif obj_type == "category":
-            result["category"].append(filter_object(obj, CATEGORY_FIELDS))
+            result["category"].append(normalize_field_names(filter_object(obj, CATEGORY_FIELDS)))
             result[RELATIONSHIP_KEY].extend(build_has_member_relationships(obj, "Relationships"))
         elif obj_type == "view":
-            result["view"].append(build_view_record(obj))
+            result["view"].append(normalize_field_names(build_view_record(obj)))
             result[RELATIONSHIP_KEY].extend(build_has_member_relationships(obj, "Members"))
 
     dropped_summary = ", ".join(f"{count} {obj_type}" for obj_type, count in sorted(dropped_counts.items()))

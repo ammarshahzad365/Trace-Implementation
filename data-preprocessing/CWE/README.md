@@ -3,7 +3,7 @@
 Trims the raw CWE bundle (`data-acquisition/CWE/latest.json`) down to a
 fully flattened, relationship-linked set of JSON files. CWE's own JSON is a
 generic XML-to-JSON conversion, not native STIX — every relation
-(`RelatedWeaknesses`, `RelatedAttackPatterns`, `AlternateTerms`,
+(`RelatedWeaknesses`, `RelatedAttackPatterns`,
 `ObservedExamples`, `Relationships.HasMember`,
 `Members.HasMember`) starts out embedded inline on the entity record
 itself, and so do several *attribute*-shaped fields that themselves nest
@@ -24,6 +24,35 @@ py cwe_preprocessing.py
 
 Optional flags: `--input` (path to `latest.json`, default: the CWE
 crawler's own output) and `--output-dir` (default: this folder).
+
+## Field names are snake_cased; `AlternateTerms` becomes a property
+
+CWE's source XML uses PascalCase element names (`Name`, `LikelihoodOfExploit`,
+`ExtendedDescription`). Every other source in this project emits snake_case,
+so output field names are normalized to match — `name`,
+`likelihood_of_exploit`, `extended_description`. One rename isn't mechanical:
+a view's `Type` would collide with the `type` field carrying the record's own
+entity kind, so it becomes `view_type`.
+
+`AlternateTerms` used to become `also_known_as` edges whose `target_ref` was
+the alias *text* — but an alias isn't an entity, so all 189 of those edges
+pointed at nothing that exists anywhere in this project, and loading them into
+a graph would have invented a phantom node per alias string. They're now an
+`aliases` list property on the weakness instead, which is also the name
+CAPEC/ATT&CK/D3FEND records use for the same concept (this project previously
+had four different spellings for it). 105 of the terms carry an explanatory
+note, kept as self-labelling `"term -- note"` strings in a parallel
+`alias_notes` property rather than an index-aligned second list, since Cypher
+can't enforce alignment.
+
+One `ObservedExample` reference (`CVE-2002-216`, on CWE-837) isn't shaped like
+a real CVE id and is dropped with a warning rather than emitted as an edge to
+something that cannot exist. Four *well-formed* CVE references remain
+unresolvable — CWE cites CVEs that the CVE side of this project doesn't
+contain, one because NVD marks it `Rejected` (and `cve_preprocessing.py` drops
+all 17,655 rejected records) and the rest because they aren't in the NVD
+snapshot at all. Those are left in place: they're correct citations, and
+`data-loading/` reports and skips them rather than inventing the nodes.
 
 ## What it does
 
@@ -49,12 +78,6 @@ crawler's own output) and `--output-dir` (default: this folder).
     stores only one direction for every `Nature` except `PeerOf`, and even
     `PeerOf` is reciprocal in just 16 of its 98 pairs, so collapsing would
     silently drop real one-directional edges rather than remove redundancy.
-  - `weakness.AlternateTerms` → `relationships.json`, `also_known_as` edges
-    where `target_ref` is the alias text itself (there's no other entity
-    for an alias to point at — same convention CAPEC uses for its own
-    `x_capec_alternate_terms`). The alias's own `Description`, when
-    present, is flattened from CWE's XHTML shape to plain text before
-    becoming the edge's `description` attribute.
   - `category.Relationships.HasMember` / `view.Members.HasMember` →
     `relationships.json`, `has_member` edges from the category/view to each
     member weakness, with `view_id` kept as an edge attribute.
@@ -134,8 +157,8 @@ reused). Reruns against the same input produce byte-identical output.
 
 `weakness.ExtendedDescription`, `weakness.BackgroundDetails`, the
 `Description`/`EffectivenessNotes` sub-fields of `PotentialMitigations`/
-`DetectionMethods`, `weakness.AlternateTerms`' own `Description`, and
-`view.Objective` aren't always a bare string — CWE's XML source wraps
+`DetectionMethods`, `AlternateTerms`' own `Description` (now an
+`alias_notes` entry rather than an edge attribute), and `view.Objective` aren't always a bare string — CWE's XML source wraps
 embedded markup (`<xhtml:p>`, `<xhtml:ul>`, nested `<xhtml:div>`) into a
 JSON shape keyed by tag name. This is formatting, not a graph relationship,
 so it's flattened to one plain-text string: paragraphs join with a blank
@@ -167,13 +190,13 @@ Ten JSON files, each a plain array of records:
 
 | File | Count | Contents |
 |---|---|---|
-| `weaknesses.json` | 969 | CWE weaknesses — id, name, description, abstraction/structure/status, ordinalities (flat array), likelihood of exploit, background details, affected resources, functional areas |
+| `weaknesses.json` | 969 | CWE weaknesses — id, name, description, extended description, abstraction/structure/status, ordinalities (flat array), likelihood of exploit, background details, affected resources, functional areas, aliases + alias notes |
 | `categories.json` | 422 | Organizational groupings — id, name, summary |
-| `views.json` | 59 | Organizational groupings for browsing/filtering — id, name, objective, type, audience (flat array of stakeholder types) |
+| `views.json` | 59 | Organizational groupings for browsing/filtering — id, name, objective, `view_type` (renamed from the source's `Type` to avoid colliding with the entity-kind `type`), audience (flat array of stakeholder types) |
 | `consequences.json` | 311 | Deduped `(scope, impact)` pairs — id, type, scope (array), impact (array) |
 | `platforms.json` | 1,527 | Deduped `(category, name)` platforms (plus private nodes for unnamed entries) — id, type, category, name |
 | `introductions.json` | 16 | Deduped introduction phases — id, type, phase |
 | `mitigations.json` | 1,253 | Deduped-by-`Mitigation_ID` mitigations (70) plus private per-weakness nodes for the rest (1,183) — id, type, mitigation_id |
 | `detection_methods.json` | 499 | Deduped-by-`Detection_Method_ID` detection methods (23) plus private per-weakness nodes for the rest (476) — id, type, detection_method_id |
-| `relationships.json` | 14,191 | Edges between entities defined in this bundle — `has_member` (5,024: category/view → weakness), `applies_to_platform` (2,072), `has_mitigation` (1,710), `introduced_in` (1,398), `child_of` (1,318), `has_consequence` (1,237), `has_detection_method` (959), `also_known_as` (189), `can_precede` (143), `peer_of` (98), `can_also_be` (27), `requires` (13), `starts_with` (3) |
-| `external_relationships.json` | 4,338 | Edges to identifiers outside this bundle, `relationship_type: "related-to"` throughout, disambiguated by `source_name` — `cve` (3,126, from `ObservedExamples`), `capec` (1,212, from `RelatedAttackPatterns`) |
+| `relationships.json` | 14,002 | Edges between entities defined in this bundle — `has_member` (5,024: category/view → weakness), `applies_to_platform` (2,072), `has_mitigation` (1,710), `introduced_in` (1,398), `child_of` (1,318), `has_consequence` (1,237), `has_detection_method` (959), `can_precede` (143), `peer_of` (98), `can_also_be` (27), `requires` (13), `starts_with` (3) |
+| `external_relationships.json` | 4,337 | Edges to identifiers outside this bundle, `relationship_type: "related-to"` throughout, disambiguated by `source_name` — `cve` (3,125, from `ObservedExamples`), `capec` (1,212, from `RelatedAttackPatterns`) |

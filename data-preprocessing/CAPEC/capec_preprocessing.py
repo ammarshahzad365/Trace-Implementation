@@ -113,7 +113,6 @@ HIERARCHY_REF_FIELDS: Dict[str, str] = {
 }
 
 PEER_OF_RELATIONSHIP_TYPE = "peer_of"
-ALSO_KNOWN_AS_RELATIONSHIP_TYPE = "also_known_as"
 HAS_CONSEQUENCE_RELATIONSHIP_TYPE = "has_consequence"
 REQUIRES_SKILL_RELATIONSHIP_TYPE = "requires_skill"
 
@@ -131,6 +130,11 @@ SKILL_LEVEL_ENTITY_TYPE = "skill-level"
 # CAPEC writes the Access Control scope with an underscore where CWE writes a space;
 # normalized to CWE's spelling so the 9 scope values are one shared vocabulary.
 CONSEQUENCE_SCOPE_ALIASES: Dict[str, str] = {"Access_Control": "Access Control"}
+
+# Fields whose concept has a twin in another source are renamed to the shared name
+# (CWE emits `extended_description`); source-specific `x_capec_*` fields keep their
+# prefix, since there's no other source's spelling to agree with.
+FIELD_NAME_OVERRIDES: Dict[str, str] = {"x_capec_extended_description": "extended_description"}
 
 OUTPUT_FILENAMES: Dict[str, str] = {
     "attack-pattern": "attack_patterns.json",
@@ -221,12 +225,17 @@ def build_hierarchy_relationships(obj: Dict[str, Any], capec_id: int, id_to_cape
     return relationships
 
 
-def build_also_known_as_relationships(obj: Dict[str, Any], capec_id: int) -> List[Dict[str, Any]]:
-    source_ref = f"CAPEC-{capec_id}"
-    return [
-        make_relationship(source_ref, alias, ALSO_KNOWN_AS_RELATIONSHIP_TYPE)
-        for alias in obj.get("x_capec_alternate_terms", [])
-    ]
+def apply_alternate_terms(obj: Dict[str, Any], record: Dict[str, Any]) -> None:
+    """Fold `x_capec_alternate_terms` into an `aliases` list property.
+
+    These used to be `also_known_as` edges whose `target_ref` was the alias text
+    itself, which pointed at no entity that exists -- loading them would have
+    invented a phantom node per alias string. `aliases` is the same name CWE,
+    ATT&CK, and D3FEND records use for this concept.
+    """
+    aliases = [alias for alias in obj.get("x_capec_alternate_terms", []) or [] if alias]
+    if aliases:
+        record["aliases"] = list(dict.fromkeys(aliases))
 
 
 def split_impact(value: str) -> Tuple[str, Optional[str]]:
@@ -327,7 +336,8 @@ def build_attack_pattern_record(obj: Dict[str, Any], capec_id: int) -> Dict[str,
             record["stix_id"] = obj["id"]
             continue
         if field in obj:
-            record[field] = obj[field]
+            record[FIELD_NAME_OVERRIDES.get(field, field)] = obj[field]
+    apply_alternate_terms(obj, record)
     return record
 
 
@@ -351,7 +361,6 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             result["attack-pattern"].append(build_attack_pattern_record(obj, capec_id))
             result[EXTERNAL_RELATIONSHIP_KEY].extend(build_external_relationships(obj, capec_id))
             result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(build_hierarchy_relationships(obj, capec_id, id_to_capec_id))
-            result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(build_also_known_as_relationships(obj, capec_id))
             result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(
                 build_consequence_relationships(obj, capec_id, consequence_ids, result[CONSEQUENCE_ENTITY_TYPE])
             )

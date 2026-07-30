@@ -119,6 +119,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -240,6 +241,18 @@ def build_weakness_relationships(obj: Dict[str, Any], cve_id: str) -> List[Dict[
     return relationships
 
 
+def snake_case(name: str) -> str:
+    """NVD's CVSS/SSVC field names are camelCase (`baseScore`, `vectorString`) with a
+    few PascalCase supplemental metrics (`Automatable`, `Safety`); every other source
+    in this project emits snake_case, so these are normalized to match. Verified after
+    every run that no two source names collapse onto the same snake_case name."""
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
+
+
+def normalize_keys(flat: Dict[str, Any]) -> Dict[str, Any]:
+    return {snake_case(key): value for key, value in flat.items()}
+
+
 def flatten_cvss_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     """Merge a cvssMetricV*[] entry's own fields with its nested cvssData fields into one
     flat dict. `type` (Primary/Secondary) is renamed `assessment_type` so it doesn't collide
@@ -251,7 +264,7 @@ def flatten_cvss_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         flat["assessment_type" if key == "type" else key] = value
     for key, value in (entry.get("cvssData") or {}).items():
         flat[key] = value
-    return flat
+    return normalize_keys(flat)
 
 
 def flatten_ssvc_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -270,7 +283,7 @@ def flatten_ssvc_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
                 flat.update(option)
             continue
         flat[key] = value
-    return flat
+    return normalize_keys(flat)
 
 
 def make_scored_entity(entity_type: str, cve_id: str, metric_key: str, index: int, flat: Dict[str, Any]) -> Dict[str, Any]:
@@ -291,7 +304,7 @@ def build_cvss_and_ssvc(obj: Dict[str, Any], cve_id: str) -> Tuple[Dict[str, Lis
         for index, entry in enumerate(cvss.get(metric_key, [])):
             flat = flatten_cvss_entry(entry)
             for field in drop_fields:
-                flat.pop(field, None)
+                flat.pop(snake_case(field), None)  # flatten_cvss_entry already normalized the keys
             entity = make_scored_entity(entity_type, cve_id, metric_key, index, flat)
             entities[entity_type].append(entity)
             relationships.append(make_relationship(cve_id, entity["id"], relationship_type))

@@ -133,6 +133,11 @@ ABSENT_CHANNEL_SENTINEL = "None"
 
 MUTABLE_ELEMENT_NOTE_SEPARATOR = " -- "  # verified absent from every field name and description
 
+# `malware`/`tool` spell their alias list `x_mitre_aliases` where `intrusion-set`/
+# `campaign` use STIX's own `aliases` -- unified on `aliases`, which is also what
+# CWE/CAPEC/D3FEND records use for this concept.
+FIELD_NAME_OVERRIDES: Dict[str, str] = {"x_mitre_aliases": "aliases"}
+
 # STIX's own "attack-pattern"/"course-of-action" types are shared with CAPEC, which uses
 # them for a genuinely different entity (CAPEC's own attack patterns/mitigations, not
 # ATT&CK's techniques/mitigations) -- overridden on the output `type` field only (internal
@@ -201,7 +206,7 @@ def merge_duplicate(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def filter_object(obj: Dict[str, Any], fields: Tuple[str, ...]) -> Dict[str, Any]:
-    return {field: obj[field] for field in fields if field in obj}
+    return {FIELD_NAME_OVERRIDES.get(field, field): obj[field] for field in fields if field in obj}
 
 
 def extract_attack_id(obj: Dict[str, Any]) -> Optional[str]:

@@ -57,6 +57,18 @@ folder).
   (`NVD-CWE-noinfo`, `NVD-CWE-Other` — 65,916 occurrences) aren't real
   catalog entries and are dropped, not extracted or kept as an attribute.
 
+## Field names in the output are snake_case
+
+NVD's CVSS and SSVC field names are camelCase (`baseScore`, `vectorString`,
+`exploitabilityScore`) with a handful of PascalCase supplemental metrics
+(`Automatable`, `Recovery`, `Safety`). Every source name mentioned in the
+section below is the *raw NVD* name; the corresponding output property is that
+name snake_cased — `base_score`, `vector_string`, `exploitability_score`,
+`automatable`. This is the same normalization `cwe_preprocessing.py` applies to
+CWE's PascalCase XML element names, so no source in this project ships two
+naming conventions. Verified after every run that no two NVD names collapse
+onto the same snake_case name.
+
 ## `x_nvd_cvss` is fully unnested, not kept as an attribute
 
 `x_nvd_cvss` is a container keyed by up to five metric-version names

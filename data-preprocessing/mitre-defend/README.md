@@ -25,8 +25,8 @@ like `"d3f:CWE-1004"` or `"d3f:T1055.001"`, and most fields carry an
 `rdfs:`/`d3f:`/`owl:`/`skos:` namespace prefix in the key itself. Unlike
 CWE/CAPEC/ATT&CK — where this project's preprocessors keep source field
 names verbatim, because they're already clean identifiers — every field
-here is renamed to a plain snake_case attribute (`name`, `definition`,
-`synonyms`, ...): a raw key containing a literal colon (`"d3f:synonym"`)
+here is renamed to a plain snake_case attribute (`name`, `description`,
+`aliases`, ...): a raw key containing a literal colon (`"d3f:synonym"`)
 is awkward to carry into a flattened JSON output the way `x_capec_abstraction`
 or `ExtendedDescription` weren't.
 
@@ -35,6 +35,17 @@ one-item list — the same quirk CWE's own XML-to-JSON conversion has for
 its single-vs-list fields, normalized here the same way (`as_list()`).
 `tactic` records also carry typed-literal values (`{"@type": "...integer",
 "@value": "3"}`) for a couple of fields, unwrapped by `literal_value()`.
+
+D3FEND's field names are also unified with the rest of the project rather
+than kept close to its own vocabulary: `d3f:definition` becomes `description`
+(what CVE/CWE/CAPEC/ATT&CK all call it), and `d3f:synonym` plus
+`skos:altLabel` are merged into one `aliases` list. Those two were separate
+alternate-name fields with no value in common on the 8 artifacts carrying both,
+so unioning them loses nothing — and `aliases` was the last of the four
+different spellings this project had for that one concept. The 8 artifacts with
+several distinct `d3f:definition` values (one per industrial protocol) get them
+joined into a single `description` string, so `description` is a string
+everywhere it appears rather than a string on most records and a list on 8.
 
 Nothing in this output nests — every property is a scalar or a `list[str]`,
 which is all Neo4j can store (checked across all four files). Unlike
@@ -74,7 +85,7 @@ ATT&CK), and a full check found nothing in either worth keeping separately:
   of `definition`s matched CWE's `Description` exactly after
   whitespace-normalizing, but the remaining 2.3% had drifted independently
   in both directions (D3FEND fuller in 17 cases, CWE fuller in 5), plus a
-  handful of D3FEND-only `synonyms` and a single `comment` recovering
+  handful of D3FEND-only alternate names and a single `comment` recovering
   content CWE's own preprocessor discards elsewhere (`Notes`). Dropped
   anyway, accepting that small residue, for the same "match id directly"
   reason as `offensive-technique`.
@@ -158,7 +169,7 @@ Four JSON files, each a plain array of records:
 
 | File | Count | Contents |
 |---|---|---|
-| `techniques.json` | 271 | D3FEND defensive techniques — id, name, `d3fend_id` (e.g. `D3-AMED`), synonyms |
-| `tactics.json` | 7 | D3FEND tactics (Harden, Detect, Isolate, Deceive, Evict, Restore, Model) — id, name, definition, display order/priority |
-| `artifacts.json` | 915 | Digital artifacts from the D3FEND Artifact Ontology — id, name, definitions, synonyms, alt labels |
+| `techniques.json` | 271 | D3FEND defensive techniques — id, name, `d3fend_id` (e.g. `D3-AMED`), aliases |
+| `tactics.json` | 7 | D3FEND tactics (Harden, Detect, Isolate, Deceive, Evict, Restore, Model) — id, name, description, display order/priority |
+| `artifacts.json` | 915 | Digital artifacts from the D3FEND Artifact Ontology — id, name, description, aliases |
 | `relationships.json` | 6,471 | `counters` (3,544, technique → ATT&CK technique id, e.g. `T1078` — no local entity file, join against `data-preprocessing/mitre-attack/techniques.json`), `child_of` (1,103, weakness → weakness — `CWE-N` ids, join against `data-preprocessing/CWE/weaknesses.json`), `has_subclass` (995, artifact → artifact), `enables` (149, technique → tactic), 63 distinct D3FEND-relation-named edges technique/ATT&CK-technique → artifact (648 total — `modifies` 107, `produces` 67, `may_modify` 56, `analyzes` 49, `accesses` 49, ... down to several with a single edge), `weakness_of` (26, weakness → artifact), `may_be_weakness_of` (6, weakness → artifact) |

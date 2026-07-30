@@ -215,6 +215,24 @@ def make_relationship(source_ref: str, target_ref: str, relationship_type: str, 
 # Entity record builders
 # --------------------------------------------------------------------------
 
+DEFINITION_SEPARATOR = "\n\n"
+
+
+def apply_aliases(record: Dict[str, Any], *sources: Any) -> None:
+    """Merge D3FEND's alternate-name fields into one `aliases` list property.
+
+    D3FEND splits alternate names across `d3f:synonym` and `skos:altLabel`; the 8
+    artifacts carrying both have no value in common, so unioning them loses nothing.
+    `aliases` is the name CWE/CAPEC/ATT&CK records use for the same concept -- these
+    were the last of the four different spellings this project had for it.
+    """
+    merged: List[str] = []
+    for source in sources:
+        merged.extend(value for value in as_list(source) if value)
+    if merged:
+        record["aliases"] = list(dict.fromkeys(merged))
+
+
 def build_technique_record(raw: Dict[str, Any]) -> Dict[str, Any]:
     record: Dict[str, Any] = {
         "id": strip_prefix(raw["@id"]),
@@ -223,9 +241,7 @@ def build_technique_record(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
     if raw.get("d3f:d3fend-id"):
         record["d3fend_id"] = raw["d3f:d3fend-id"]
-    synonyms = as_list(raw.get("d3f:synonym"))
-    if synonyms:
-        record["synonyms"] = synonyms
+    apply_aliases(record, raw.get("d3f:synonym"))
     return record
 
 
@@ -236,7 +252,7 @@ def build_tactic_record(raw: Dict[str, Any]) -> Dict[str, Any]:
         "name": raw.get("rdfs:label"),
     }
     if raw.get("d3f:definition"):
-        record["definition"] = raw["d3f:definition"]
+        record["description"] = raw["d3f:definition"]
     if "d3f:display-order" in raw:
         record["display_order"] = int(literal_value(raw["d3f:display-order"]))
     if "d3f:display-priority" in raw:
@@ -253,13 +269,11 @@ def build_artifact_record(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
     definitions = as_list(raw.get("d3f:definition"))
     if definitions:
-        record["definitions"] = definitions
-    synonyms = as_list(raw.get("d3f:synonym"))
-    if synonyms:
-        record["synonyms"] = synonyms
-    alt_labels = as_list(raw.get("skos:altLabel"))
-    if alt_labels:
-        record["alt_labels"] = alt_labels
+        # 8 artifacts carry several genuinely different definitions (one per
+        # industrial protocol); joined so `description` is a string everywhere it
+        # appears rather than a string on most records and a list on 8.
+        record["description"] = DEFINITION_SEPARATOR.join(definitions)
+    apply_aliases(record, raw.get("d3f:synonym"), raw.get("skos:altLabel"))
     return record
 
 
