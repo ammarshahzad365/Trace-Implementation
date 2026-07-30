@@ -42,8 +42,8 @@ py -m incremental_crawler
 Run the full crawler at least once (per source) before the incremental one —
 every source's incremental crawler needs a `manifest.json` (or, for MITRE
 ATT&CK, a per-domain `last_successful_fetch`) from a prior successful run.
-CVE also needs a `.env` with `NVD_API_KEY` in `CVE/` for a reasonable rate
-limit (it still works without one, just slower).
+CVE also needs a `.env` with `NVD_API_KEY` at the repository root for a
+reasonable rate limit (it still works without one, just slower).
 
 ### Useful flags
 

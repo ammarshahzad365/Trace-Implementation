@@ -121,7 +121,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--api-key",
         default=None,
-        help="NVD API key (defaults to NVD_API_KEY from .env or the environment)",
+        help="NVD API key (defaults to NVD_API_KEY from the repo-root .env or the environment)",
     )
     parser.add_argument(
         "--results-per-page",
@@ -159,7 +159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     base_dir = Path(args.base_dir)
     base_dir.mkdir(parents=True, exist_ok=True)
 
-    client.load_dotenv(base_dir / ".env")
+    client.load_dotenv()  # project-wide .env at the repo root -- see client.project_dotenv_path
     api_key = args.api_key or os.environ.get("NVD_API_KEY")
 
     try:

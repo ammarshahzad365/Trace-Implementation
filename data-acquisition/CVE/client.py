@@ -3,6 +3,9 @@
 This module provides the common .env loading, NVD REST API access, rate limiting,
 STIX 2.1 conversion, and state/bundle utilities used by full_crawler.py and
 incremental_crawler.py.
+
+The NVD API key is read from a project-wide `.env` at the repository root, not from
+this folder -- see `project_dotenv_path()`.
 """
 
 from __future__ import annotations
@@ -40,11 +43,31 @@ class SyncError(RuntimeError):
 # .env loading
 # --------------------------------------------------------------------------
 
-def load_dotenv(path: Path) -> None:
+# The repository root (this file lives at <root>/data-acquisition/CVE/client.py).
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def project_dotenv_path() -> Path:
+    """Path to the project-wide `.env`, which lives at the repository root rather
+    than in this crawler's own folder.
+
+    Deliberately derived from this file's location, not from the crawlers'
+    `--base-dir`: that flag points at the crawler's *output* workspace (where
+    `records/` and `manifest.json` are written) and can be pointed anywhere, so
+    resolving credentials through it would make the key's location depend on where
+    output happens to go.
+    """
+    return REPO_ROOT / ".env"
+
+
+def load_dotenv(path: Path | None = None) -> None:
     """Load KEY=VALUE pairs from a .env file into os.environ without overwriting
-    variables that are already set in the real environment."""
+    variables that are already set in the real environment. Defaults to the
+    project-wide `.env` at the repository root."""
     import os
 
+    if path is None:
+        path = project_dotenv_path()
     if not path.exists():
         return
     for raw_line in path.read_text(encoding="utf-8").splitlines():

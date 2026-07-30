@@ -31,7 +31,7 @@ like" section with real sample records).
 
 | Source | Folder | Upstream | Local format | Notable design point |
 |---|---|---|---|---|
-| CVE | `data-acquisition/CVE/` | NVD REST API 2.0 | STIX 2.1 `vulnerability` objects, sharded by year (1999–2026) | Converts raw NVD JSON to STIX; sliding-window rate limiter matching NVD's quota (5/30s, 50/30s with an API key in `.env`); 120-day incremental fetch windowing (NVD's own limit) |
+| CVE | `data-acquisition/CVE/` | NVD REST API 2.0 | STIX 2.1 `vulnerability` objects, sharded by year (1999–2026) | Converts raw NVD JSON to STIX; sliding-window rate limiter matching NVD's quota (5/30s, 50/30s with an API key in the repo-root `.env`); 120-day incremental fetch windowing (NVD's own limit) |
 | CWE | `data-acquisition/CWE/` | MITRE's versioned XML catalog (no bulk REST API exists) | Generic XML→JSON (`weakness`/`category`/`view` records, flat array) | No native timestamp field — `created`/`modified` synthesized per entry from its own embedded `Content_History` |
 | CAPEC | `data-acquisition/CAPEC/` | MITRE's pre-built STIX 2.1 bundle (mitre/cti GitHub repo) | STIX 2.1, used as-is | No conversion needed; corpus version read from `x_capec_version` (no separate version endpoint) |
 | MITRE ATT&CK | `data-acquisition/mitre-attack/` | MITRE's TAXII 2.1 server | STIX 2.1, per domain (enterprise/mobile/ics), each with a full version-history archive (`history/<version>.json`, seeded once via `historical_loader.py` from a vendored `mitre/attack-stix-data` clone) | The only source with a genuine date-filtered upstream API (`added_after` TAXII cursor) — incremental runs actually fetch less, not just diff less |

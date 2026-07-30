@@ -6,7 +6,8 @@ STIX 2.1 `vulnerability` objects.
 
 ## Quick Start
 
-1. Put your NVD API key in `.env` in this folder: `NVD_API_KEY=your-key-here`.
+1. Put your NVD API key in `.env` at the **repository root** (not in this folder):
+   `NVD_API_KEY=your-key-here`.
 2. Open PowerShell in this folder.
 3. Run `.\run.ps1` and choose `1` (full crawler, first run) or `2` (incremental crawler).
 
@@ -16,7 +17,7 @@ one-line summary per year plus a JSON report when they finish.
 
 ## What this folder does
 
-- `client.py` - shared helpers: `.env` loading, NVD API access with rate limiting and
+- `client.py` - shared helpers: `.env` loading (from the repo root), NVD API access with rate limiting and
   retry, conversion of NVD CVE records to STIX 2.1, and the state/bundle utilities
   used by both crawlers.
 - `full_crawler.py` - fetches every CVE currently in NVD, compares it against what is
@@ -40,7 +41,6 @@ data-acquisition/CVE/
 ├── full_crawler.py
 ├── incremental_crawler.py
 ├── run.ps1
-├── .env                  # NVD_API_KEY=... (not committed; loaded automatically)
 ├── manifest.json         # last_successful_fetch + per-year counts from the last run
 └── records/
     └── <year>/           # year taken from the CVE ID, e.g. CVE-2023-xxxxx -> records/2023/
@@ -106,9 +106,16 @@ Each NVD CVE record becomes one STIX 2.1 `vulnerability` object:
 
 Without a key, NVD allows 5 requests per rolling 30 seconds. With a key, that rises to
 50 requests per rolling 30 seconds — roughly 10x faster for a full crawl. Put your key
-in `.env` as `NVD_API_KEY=...`; it's loaded automatically (falls back to a real
-`NVD_API_KEY` environment variable, then `--api-key`). Both crawlers back off and
-retry automatically on NVD's transient HTTP 403/429 responses.
+as `NVD_API_KEY=...` in the `.env` at the **repository root** — one project-wide
+credentials file rather than one per crawler folder, and already covered by the
+root `.gitignore`. It's loaded automatically (falls back to a real `NVD_API_KEY`
+environment variable, then `--api-key`).
+
+The load path is derived from `client.py`'s own location, deliberately *not* from
+`--base-dir`: that flag points at the crawler's output workspace and can be pointed
+anywhere, so resolving the key through it would tie the credential's location to
+wherever output happens to go. Both crawlers back off and retry automatically on
+NVD's transient HTTP 403/429 responses.
 
 ## Useful flags
 

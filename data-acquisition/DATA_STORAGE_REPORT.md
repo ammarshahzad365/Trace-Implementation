@@ -25,7 +25,7 @@ content-hash state model instead (see §5 and §6).
 
 ## 1. CVE (`data-acquisition/CVE/`)
 
-**Upstream**: NVD CVE REST API 2.0 (`https://services.nvd.nist.gov/rest/json/cves/2.0`), paginated, rate-limited (5 req/30s without an API key, 50 req/30s with one — `.env` holds `NVD_API_KEY`).
+**Upstream**: NVD CVE REST API 2.0 (`https://services.nvd.nist.gov/rest/json/cves/2.0`), paginated, rate-limited (5 req/30s without an API key, 50 req/30s with one — the repo-root `.env` holds `NVD_API_KEY`).
 
 **On-disk layout**: sharded by year, parsed straight out of the CVE ID (`CVE-<year>-<n>`):
 
