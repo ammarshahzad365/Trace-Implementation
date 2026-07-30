@@ -1,100 +1,18 @@
-"""MITRE ATT&CK field-projection preprocessor.
+"""MITRE ATT&CK field-projection preprocessor. See README.md for full rationale.
 
-Reads the three raw STIX 2.1 bundles produced by the ATT&CK crawler
-(`data-acquisition/mitre-attack/{enterprise,mobile,ics}/latest.json`) and
-writes one merged, trimmed set of JSON files. Unlike CWE/CAPEC/CVE, ATT&CK
-ships as three separate domain bundles that legitimately share entities: a
-threat group, piece of malware, campaign, or data component tracked across
-multiple matrices keeps the *same* STIX id in every domain bundle it
-appears in (self-described via each copy's own `x_mitre_domains` list).
-Techniques, analytics, detection strategies, tools, tactics, mitigations,
-and matrices, by contrast, never repeat an id across domains -- each domain
-has its own distinct set. Given that, this script merges all three domains
-into one deduplicated object set (keyed by STIX id) rather than writing
-three parallel per-domain output folders: for ids that appear in more than
-one domain bundle, the `x_mitre_domains` lists are unioned (the two copies
-were found to differ *only* in that field) and the rest of the fields are
-taken from whichever copy has the later `modified` timestamp.
+Merges the three raw STIX 2.1 bundles from the ATT&CK crawler
+(`data-acquisition/mitre-attack/{enterprise,mobile,ics}/latest.json`) into
+one deduplicated set of entity/relationship files, keyed by each entity's
+human-readable ATT&CK code (`T1055`, `S0002`, ...) rather than its STIX id
+-- see `resolve_canonical_ids()`. `stix_id` keeps the original STIX id.
 
-`identity`, `marking-definition`, and `x-mitre-collection` objects are
-dropped entirely -- pure STIX attribution/collection-manifest boilerplate,
-the same treatment CAPEC gives `identity`/`marking-definition`.
-
-Every remaining object type is reduced to a field whitelist (see this
-module's `*_FIELDS` constants). `external_references` is never kept
-verbatim:
-
-- its `mitre-attack` entry (or, on a handful of legacy revoked/deprecated
-  records, `mitre-ics-attack`/`mitre-mobile-attack`) becomes a plain
-  `attack_id` string attribute (e.g. `T1055`, `S0002`, `G0016`, `M1013`,
-  `C0028`, `TA0009`, `DS0026`, `DET0210`, `AN0001`, `DC0103`, `A0008`) --
-  the same convention CAPEC uses for its own `capec_id`. 19 records total
-  (12 `attack-pattern`, 7 `malware`, all revoked or deprecated) have no
-  such entry and are simply left without an `attack_id`, rather than
-  raising an error the way CAPEC's stricter `extract_capec_id` does --
-  this project intentionally keeps revoked/deprecated ATT&CK objects
-  (unlike CVE's dropped `Rejected` records) since ATT&CK's own
-  `revoked-by` relationships point *at* them, so silently discarding a
-  revoked object would leave those edges dangling.
-- its `capec` entries become `T#### --related-to--> CAPEC-N` records in
-  `external_relationships.json` (`source_name: "capec"`) -- the reverse
-  direction of CAPEC's own `CAPEC-N --related-to--> T####` edges (from its
-  own `ATTACK`-sourced `external_references`).
-- every other entry is a bibliographic citation (no local entity to point
-  at) and is dropped, along with the field itself, on every object type --
-  same treatment CWE gives `References`/`Notes`. Two derived campaign
-  fields that only made sense paired with a (now-dropped) citation --
-  `x_mitre_first_seen_citation`/`x_mitre_last_seen_citation` -- are dropped
-  for the same reason, even though `first_seen`/`last_seen` themselves are
-  kept.
-
-Several embedded id-list fields are removed from their entity record and
-rebuilt as `derived_relationships.json` edges instead, using each
-endpoint's `attack_id` (not its STIX id) as `source_ref`/`target_ref` --
-again the same convention CAPEC uses for its own derived
-`attack_pattern_relationships.json`, as opposed to the STIX ids kept on
-CAPEC's *native* `relationships.json`:
-
-- `attack-pattern.kill_chain_phases` -> `has_tactic` edges. ATT&CK has no
-  `relationship` object for technique-to-tactic membership at all -- it's
-  a string match between `kill_chain_phases[].phase_name` and
-  `x-mitre-tactic.x_mitre_shortname`, scoped to the domain implied by
-  `kill_chain_phases[].kill_chain_name` (`mitre-attack` ->
-  `enterprise-attack`, `mitre-mobile-attack` -> `mobile-attack`,
-  `mitre-ics-attack` -> `ics-attack`). Tactic shortnames were verified
-  unique within every domain, so this match is unambiguous.
-- `x-mitre-matrix.tactic_refs` -> `has_member` edges (matrix -> tactic),
-  mirroring the `has_member` edges CWE derives from its own
-  `Relationships.HasMember`/`Members.HasMember` fields.
-- `x-mitre-detection-strategy.x_mitre_analytic_refs` -> `has_analytic`
-  edges (detection-strategy -> analytic).
-- `x-mitre-analytic.x_mitre_log_source_references[].x_mitre_data_component_ref`
-  -> `uses_data_component` edges (analytic -> data-component), with the
-  log source's `name`/`channel` kept as edge attributes.
-
-`x-mitre-data-source` has no formal link to `x-mitre-data-component` left
-anywhere in the source data (a from-scratch grep found zero
-`data_source_ref` occurrences) -- it's effectively a legacy/orphaned type
-now that analytics point straight at data-components, so it's kept as a
-plain entity list with no edges.
-
-`x-mitre-asset.x_mitre_related_assets` stays embedded as an attribute
-rather than becoming a relationship: it references narrower device
-sub-types by free-text name (41 of 43 references don't match any other
-asset's `name` in the bundle at all), not another `x-mitre-asset` entity by
-id -- there's nothing to resolve.
-
-Native `relationship` objects (`uses`, `mitigates`, `detects`,
-`subtechnique-of`, `revoked-by`, `attributed-to`, `targets`) are kept
-mostly as-is in `relationships.json`, with their original STIX
-`source_ref`/`target_ref` untouched (unlike the derived edges above).
-`revoked`/`x_mitre_deprecated` are dropped from relationship records
-specifically -- verified always `False`/absent across all 24,582
-relationships in this dataset, pure boilerplate with no signal.
-`external_references` (citations) are dropped for the same bibliography
-reason as everywhere else; `description` is kept when present since,
-unlike CWE/CAPEC relationships, ATT&CK relationship descriptions carry
-real analytic content (e.g. *how* a piece of malware uses a technique).
+STIX boilerplate types and a few bookkeeping-only fields are dropped (see
+`*_FIELDS`). Embedded id-list fields with no native STIX `relationship`
+object (technique<->tactic, matrix->tactic, detection-strategy->analytic,
+analytic->data-component) become `derived_relationships.json` edges; native
+`relationship` objects go to `relationships.json` with `source_ref`/
+`target_ref` rewritten to the same id space; CAPEC cross-references go to
+`external_relationships.json`.
 """
 
 from __future__ import annotations
@@ -114,9 +32,7 @@ DOMAIN_LATEST_FILES: Tuple[str, ...] = (
 
 BOILERPLATE_TYPES = {"identity", "marking-definition", "x-mitre-collection"}
 
-# external_references source_name values that carry an object's own canonical ATT&CK id.
-# mitre-ics-attack/mitre-mobile-attack are a legacy convention found only on a small
-# number of revoked/deprecated objects predating the unified "mitre-attack" source_name.
+# external_reference source_name values that carry an object's own ATT&CK code.
 ATTACK_ID_SOURCE_NAMES = {"mitre-attack", "mitre-ics-attack", "mitre-mobile-attack"}
 
 KILL_CHAIN_NAME_TO_DOMAIN: Dict[str, str] = {
@@ -125,16 +41,14 @@ KILL_CHAIN_NAME_TO_DOMAIN: Dict[str, str] = {
     "mitre-ics-attack": "ics-attack",
 }
 
+# `id`/`stix_id` are assigned in parse(), not copied from the raw STIX object.
 COMMON_FIELDS: Tuple[str, ...] = (
-    "id",
     "type",
     "name",
     "description",
-    "attack_id",
     "x_mitre_domains",
     "revoked",
     "x_mitre_deprecated",
-    "x_mitre_version",
     "created",
     "modified",
 )
@@ -142,23 +56,21 @@ COMMON_FIELDS: Tuple[str, ...] = (
 TECHNIQUE_FIELDS: Tuple[str, ...] = COMMON_FIELDS + (
     "x_mitre_platforms",
     "x_mitre_is_subtechnique",
-    "x_mitre_contributors",
     "x_mitre_tactic_type",
     "x_mitre_impact_type",
     "x_mitre_remote_support",
 )
-MALWARE_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_platforms", "x_mitre_aliases", "x_mitre_contributors", "is_family")
-TOOL_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_platforms", "x_mitre_aliases", "x_mitre_contributors")
-INTRUSION_SET_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("aliases", "x_mitre_contributors")
-CAMPAIGN_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("aliases", "first_seen", "last_seen", "x_mitre_contributors")
+MALWARE_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_platforms", "x_mitre_aliases", "is_family")
+TOOL_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_platforms", "x_mitre_aliases")
+INTRUSION_SET_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("aliases",)
+CAMPAIGN_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("aliases", "first_seen", "last_seen")
 COURSE_OF_ACTION_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("labels",)
-TACTIC_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_shortname",)
 MATRIX_FIELDS: Tuple[str, ...] = COMMON_FIELDS  # tactic_refs extracted to derived_relationships.json
 ANALYTIC_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_platforms", "x_mitre_mutable_elements")
 DETECTION_STRATEGY_FIELDS: Tuple[str, ...] = COMMON_FIELDS  # x_mitre_analytic_refs extracted
 DATA_COMPONENT_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_log_sources",)
-DATA_SOURCE_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_collection_layers", "x_mitre_platforms", "x_mitre_contributors")
-ASSET_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_platforms", "x_mitre_sectors", "x_mitre_related_assets")
+DATA_SOURCE_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_collection_layers", "x_mitre_platforms")
+ASSET_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_platforms", "x_mitre_sectors")
 
 RELATIONSHIP_PASSTHROUGH_FIELDS: Tuple[str, ...] = ("id", "type", "relationship_type", "source_ref", "target_ref", "description", "created", "modified")
 
@@ -169,7 +81,7 @@ FIELDS_BY_TYPE: Dict[str, Tuple[str, ...]] = {
     "intrusion-set": INTRUSION_SET_FIELDS,
     "campaign": CAMPAIGN_FIELDS,
     "course-of-action": COURSE_OF_ACTION_FIELDS,
-    "x-mitre-tactic": TACTIC_FIELDS,
+    "x-mitre-tactic": COMMON_FIELDS,
     "x-mitre-matrix": MATRIX_FIELDS,
     "x-mitre-analytic": ANALYTIC_FIELDS,
     "x-mitre-detection-strategy": DETECTION_STRATEGY_FIELDS,
@@ -258,9 +170,9 @@ def extract_attack_id(obj: Dict[str, Any]) -> Optional[str]:
 
 
 def make_relationship(source_ref: str, target_ref: str, relationship_type: str, **extra: Any) -> Dict[str, Any]:
-    # extra is folded into the seed because some derived edges (analytic -> data-component)
-    # can legitimately repeat with the same (source, type, target) but different attributes
-    # (e.g. two distinct log-source channels feeding the same data component).
+    # extra is folded into the seed: some derived edges legitimately repeat the same
+    # (source, type, target) with different attributes (e.g. two log-source channels
+    # feeding the same data component).
     seed_parts = [source_ref, relationship_type, target_ref]
     seed_parts.extend(f"{key}={extra[key]}" for key in sorted(extra))
     seed = "mitre-attack-preprocessing:" + "|".join(seed_parts)
@@ -276,12 +188,19 @@ def make_relationship(source_ref: str, target_ref: str, relationship_type: str, 
     return record
 
 
-def build_native_relationship(obj: Dict[str, Any]) -> Dict[str, Any]:
-    return filter_object(obj, RELATIONSHIP_PASSTHROUGH_FIELDS)
+def build_native_relationship(obj: Dict[str, Any], id_to_final_id: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    record = filter_object(obj, RELATIONSHIP_PASSTHROUGH_FIELDS)
+    final_source = id_to_final_id.get(record["source_ref"])
+    final_target = id_to_final_id.get(record["target_ref"])
+    if final_source is None or final_target is None:
+        return None  # one endpoint was the losing side of an id collision -- see resolve_canonical_ids
+    record["source_ref"] = final_source
+    record["target_ref"] = final_target
+    return record
 
 
-def build_capec_relationships(obj: Dict[str, Any], attack_id: Optional[str]) -> List[Dict[str, Any]]:
-    if not attack_id:
+def build_capec_relationships(obj: Dict[str, Any], entity_id: Optional[str]) -> List[Dict[str, Any]]:
+    if not entity_id:
         return []
     relationships = []
     for ref in obj.get("external_references", []) or []:
@@ -290,14 +209,14 @@ def build_capec_relationships(obj: Dict[str, Any], attack_id: Optional[str]) -> 
         target_ref = ref.get("external_id")
         if not target_ref:
             continue
-        relationships.append(make_relationship(attack_id, target_ref, EXTERNAL_RELATIONSHIP_TYPE, source_name="capec"))
+        relationships.append(make_relationship(entity_id, target_ref, EXTERNAL_RELATIONSHIP_TYPE, source_name="capec"))
     return relationships
 
 
 def build_technique_tactic_relationships(
-    obj: Dict[str, Any], attack_id: Optional[str], tactic_by_domain_shortname: Dict[Tuple[str, str], str]
+    obj: Dict[str, Any], entity_id: Optional[str], tactic_by_domain_shortname: Dict[Tuple[str, str], str]
 ) -> List[Dict[str, Any]]:
-    if not attack_id:
+    if not entity_id:
         return []
     relationships = []
     for kill_chain_phase in obj.get("kill_chain_phases", []) or []:
@@ -305,75 +224,125 @@ def build_technique_tactic_relationships(
         phase_name = kill_chain_phase.get("phase_name")
         if not domain or not phase_name:
             continue
-        tactic_attack_id = tactic_by_domain_shortname.get((domain, phase_name))
-        if tactic_attack_id is None:
-            raise ParseError(f"technique {attack_id} kill_chain_phase {phase_name!r} in domain {domain!r} matches no x-mitre-tactic shortname")
-        relationships.append(make_relationship(attack_id, tactic_attack_id, HAS_TACTIC_RELATIONSHIP_TYPE))
+        tactic_id = tactic_by_domain_shortname.get((domain, phase_name))
+        if tactic_id is None:
+            raise ParseError(f"technique {entity_id} kill_chain_phase {phase_name!r} in domain {domain!r} matches no x-mitre-tactic shortname")
+        relationships.append(make_relationship(entity_id, tactic_id, HAS_TACTIC_RELATIONSHIP_TYPE))
     return relationships
 
 
-def resolve_attack_id(stix_id: str, id_to_attack_id: Dict[str, str], context: str) -> str:
-    attack_id = id_to_attack_id.get(stix_id)
-    if attack_id is None:
-        raise ParseError(f"{context} ref {stix_id!r} does not resolve to any known object with an attack_id")
-    return attack_id
+def resolve_entity_id(stix_id: str, id_to_final_id: Dict[str, str], context: str) -> str:
+    final_id = id_to_final_id.get(stix_id)
+    if final_id is None:
+        raise ParseError(f"{context} ref {stix_id!r} does not resolve to any known object in this bundle")
+    return final_id
 
 
-def build_matrix_relationships(obj: Dict[str, Any], attack_id: Optional[str], id_to_attack_id: Dict[str, str]) -> List[Dict[str, Any]]:
-    if not attack_id:
+def build_matrix_relationships(obj: Dict[str, Any], entity_id: Optional[str], id_to_final_id: Dict[str, str]) -> List[Dict[str, Any]]:
+    if not entity_id:
         return []
     relationships = []
     for tactic_stix_id in obj.get("tactic_refs", []) or []:
-        target_ref = resolve_attack_id(tactic_stix_id, id_to_attack_id, f"matrix {attack_id} tactic_refs")
-        relationships.append(make_relationship(attack_id, target_ref, HAS_MEMBER_RELATIONSHIP_TYPE))
+        target_ref = resolve_entity_id(tactic_stix_id, id_to_final_id, f"matrix {entity_id} tactic_refs")
+        relationships.append(make_relationship(entity_id, target_ref, HAS_MEMBER_RELATIONSHIP_TYPE))
     return relationships
 
 
-def build_detection_strategy_relationships(obj: Dict[str, Any], attack_id: Optional[str], id_to_attack_id: Dict[str, str]) -> List[Dict[str, Any]]:
-    if not attack_id:
+def build_detection_strategy_relationships(obj: Dict[str, Any], entity_id: Optional[str], id_to_final_id: Dict[str, str]) -> List[Dict[str, Any]]:
+    if not entity_id:
         return []
     relationships = []
     for analytic_stix_id in obj.get("x_mitre_analytic_refs", []) or []:
-        target_ref = resolve_attack_id(analytic_stix_id, id_to_attack_id, f"detection-strategy {attack_id} x_mitre_analytic_refs")
-        relationships.append(make_relationship(attack_id, target_ref, HAS_ANALYTIC_RELATIONSHIP_TYPE))
+        target_ref = resolve_entity_id(analytic_stix_id, id_to_final_id, f"detection-strategy {entity_id} x_mitre_analytic_refs")
+        relationships.append(make_relationship(entity_id, target_ref, HAS_ANALYTIC_RELATIONSHIP_TYPE))
     return relationships
 
 
-def build_analytic_relationships(obj: Dict[str, Any], attack_id: Optional[str], id_to_attack_id: Dict[str, str]) -> List[Dict[str, Any]]:
-    if not attack_id:
+def build_analytic_relationships(obj: Dict[str, Any], entity_id: Optional[str], id_to_final_id: Dict[str, str]) -> List[Dict[str, Any]]:
+    if not entity_id:
         return []
     relationships = []
     for log_source in obj.get("x_mitre_log_source_references", []) or []:
         data_component_stix_id = log_source.get("x_mitre_data_component_ref")
         if not data_component_stix_id:
             continue
-        target_ref = resolve_attack_id(data_component_stix_id, id_to_attack_id, f"analytic {attack_id} x_mitre_log_source_references")
+        target_ref = resolve_entity_id(data_component_stix_id, id_to_final_id, f"analytic {entity_id} x_mitre_log_source_references")
         extra: Dict[str, Any] = {}
         if log_source.get("name"):
             extra["log_source_name"] = log_source["name"]
         if log_source.get("channel"):
             extra["channel"] = log_source["channel"]
-        relationships.append(make_relationship(attack_id, target_ref, USES_DATA_COMPONENT_RELATIONSHIP_TYPE, **extra))
+        relationships.append(make_relationship(entity_id, target_ref, USES_DATA_COMPONENT_RELATIONSHIP_TYPE, **extra))
     return relationships
 
 
+def resolve_canonical_ids(objects: Sequence[Dict[str, Any]]) -> Dict[str, str]:
+    """Map every surviving entity's STIX id to its final `id` (its ATT&CK code).
+
+    A code is only unique within its own object type upstream: 224 pre-2019
+    `course-of-action` mitigations reuse their technique's `T####`, and one
+    pair each of `malware`/`x-mitre-matrix` share a code outright (see
+    README). Technique/mitigation collisions keep the technique (some are
+    revoked but still carry this project's only CAPEC cross-reference);
+    same-type collisions keep whichever side is active
+    (`x_mitre_deprecated`/`revoked` both false/absent); a collision with no
+    clear winner drops every member and logs a warning.
+
+    Entities with no ATT&CK code keep their STIX id as `id`. A dropped
+    object is simply absent from the returned mapping -- `parse()`/
+    `build_native_relationship()` treat a missing lookup as "drop this".
+    """
+    entities = [obj for obj in objects if obj.get("type") in FIELDS_BY_TYPE]
+    attack_id_of = {obj["id"]: extract_attack_id(obj) for obj in entities}
+
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for obj in entities:
+        attack_id = attack_id_of[obj["id"]]
+        if attack_id:
+            groups.setdefault(attack_id, []).append(obj)
+
+    id_to_final_id: Dict[str, str] = {}
+    for attack_id, members in groups.items():
+        if len(members) == 1:
+            id_to_final_id[members[0]["id"]] = attack_id
+            continue
+
+        types = {member["type"] for member in members}
+        if types == {"attack-pattern", "course-of-action"}:
+            winner = next(member for member in members if member["type"] == "attack-pattern")
+        else:
+            active = [member for member in members if not (member.get("x_mitre_deprecated") or member.get("revoked"))]
+            winner = active[0] if len(active) == 1 else None
+
+        if winner is None:
+            print(
+                f"[mitre-attack-parser] warning: attack_id {attack_id!r} is claimed by "
+                f"{len(members)} objects with no clear winner "
+                f"({sorted(member['id'] for member in members)}) -- dropping all of them",
+                file=sys.stderr,
+            )
+            continue
+        id_to_final_id[winner["id"]] = attack_id
+
+    for obj in entities:
+        if obj["id"] not in id_to_final_id and not attack_id_of[obj["id"]]:
+            id_to_final_id[obj["id"]] = obj["id"]  # no ATT&CK code at all -- keep its STIX id
+
+    return id_to_final_id
+
+
 def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    id_to_attack_id: Dict[str, str] = {}
-    for obj in objects:
-        if obj.get("type") in FIELDS_BY_TYPE:
-            attack_id = extract_attack_id(obj)
-            if attack_id:
-                id_to_attack_id[obj["id"]] = attack_id
+    id_to_final_id = resolve_canonical_ids(objects)
 
     tactic_by_domain_shortname: Dict[Tuple[str, str], str] = {}
     for obj in objects:
         if obj.get("type") != "x-mitre-tactic":
             continue
-        attack_id = id_to_attack_id.get(obj["id"])
-        if not attack_id:
+        final_id = id_to_final_id.get(obj["id"])
+        if not final_id:
             continue
         for domain in obj.get("x_mitre_domains", []) or []:
-            tactic_by_domain_shortname[(domain, obj.get("x_mitre_shortname"))] = attack_id
+            tactic_by_domain_shortname[(domain, obj.get("x_mitre_shortname"))] = final_id
 
     result: Dict[str, List[Dict[str, Any]]] = {obj_type: [] for obj_type in FIELDS_BY_TYPE}
     result[RELATIONSHIP_KEY] = []
@@ -385,7 +354,9 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
         obj_type = str(obj.get("type") or "")
 
         if obj_type == RELATIONSHIP_KEY:
-            result[RELATIONSHIP_KEY].append(build_native_relationship(obj))
+            native = build_native_relationship(obj, id_to_final_id)
+            if native is not None:
+                result[RELATIONSHIP_KEY].append(native)
             continue
 
         if obj_type in BOILERPLATE_TYPES:
@@ -398,21 +369,24 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             dropped_counts[obj_type] = dropped_counts.get(obj_type, 0) + 1
             continue
 
-        attack_id = id_to_attack_id.get(obj["id"])
+        final_id = id_to_final_id.get(obj["id"])
+        if final_id is None:
+            dropped_counts[obj_type] = dropped_counts.get(obj_type, 0) + 1
+            continue  # losing side of an id collision -- see resolve_canonical_ids
+
         record = filter_object(obj, fields)
-        if attack_id:
-            record["attack_id"] = attack_id
+        record = {"id": final_id, "stix_id": obj["id"], **record}
         result[obj_type].append(record)
 
         if obj_type == "attack-pattern":
-            result[EXTERNAL_RELATIONSHIP_KEY].extend(build_capec_relationships(obj, attack_id))
-            result[DERIVED_RELATIONSHIP_KEY].extend(build_technique_tactic_relationships(obj, attack_id, tactic_by_domain_shortname))
+            result[EXTERNAL_RELATIONSHIP_KEY].extend(build_capec_relationships(obj, final_id))
+            result[DERIVED_RELATIONSHIP_KEY].extend(build_technique_tactic_relationships(obj, final_id, tactic_by_domain_shortname))
         elif obj_type == "x-mitre-matrix":
-            result[DERIVED_RELATIONSHIP_KEY].extend(build_matrix_relationships(obj, attack_id, id_to_attack_id))
+            result[DERIVED_RELATIONSHIP_KEY].extend(build_matrix_relationships(obj, final_id, id_to_final_id))
         elif obj_type == "x-mitre-detection-strategy":
-            result[DERIVED_RELATIONSHIP_KEY].extend(build_detection_strategy_relationships(obj, attack_id, id_to_attack_id))
+            result[DERIVED_RELATIONSHIP_KEY].extend(build_detection_strategy_relationships(obj, final_id, id_to_final_id))
         elif obj_type == "x-mitre-analytic":
-            result[DERIVED_RELATIONSHIP_KEY].extend(build_analytic_relationships(obj, attack_id, id_to_attack_id))
+            result[DERIVED_RELATIONSHIP_KEY].extend(build_analytic_relationships(obj, final_id, id_to_final_id))
 
     dropped_summary = ", ".join(f"{count} {obj_type}" for obj_type, count in sorted(dropped_counts.items()))
     print(f"[mitre-attack-parser] parsed {len(objects)} merged objects; dropped {dropped_summary or 'nothing'}")
