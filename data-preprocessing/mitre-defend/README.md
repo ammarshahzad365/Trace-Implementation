@@ -36,6 +36,12 @@ its single-vs-list fields, normalized here the same way (`as_list()`).
 `tactic` records also carry typed-literal values (`{"@type": "...integer",
 "@value": "3"}`) for a couple of fields, unwrapped by `literal_value()`.
 
+Nothing in this output nests — every property is a scalar or a `list[str]`,
+which is all Neo4j can store (checked across all four files). Unlike
+`mitre-attack`, which had two `list[map]` fields to unpack, D3FEND's own
+nesting is confined to the typed literals and relationship endpoints already
+unwrapped above, so no field needed splitting out for this reason.
+
 `_content_hash`/`_first_seen_at` are dropped from every record — this
 project's *own* crawler bookkeeping (D3FEND has no native timestamps at
 all, per the crawler's own README), not domain content. `@type` is dropped

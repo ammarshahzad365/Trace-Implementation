@@ -9,10 +9,23 @@ human-readable ATT&CK code (`T1055`, `S0002`, ...) rather than its STIX id
 STIX boilerplate types and a few bookkeeping-only fields are dropped (see
 `*_FIELDS`). Embedded id-list fields with no native STIX `relationship`
 object (technique<->tactic, matrix->tactic, detection-strategy->analytic,
-analytic->data-component) become `derived_relationships.json` edges; native
-`relationship` objects go to `relationships.json` with `source_ref`/
-`target_ref` rewritten to the same id space; CAPEC cross-references go to
-`external_relationships.json`.
+analytic->data-component, data-component->log-source) become
+`derived_relationships.json` edges; native `relationship` objects go to
+`relationships.json` with `source_ref`/`target_ref` rewritten to the same id
+space; CAPEC cross-references go to `external_relationships.json`.
+
+Nothing in the output nests: Neo4j properties hold scalars or scalar arrays,
+never maps. ATT&CK's only two list-of-map fields are unpacked --
+`x_mitre_log_sources` into `log_sources.json` entities plus `has_log_source`
+edges (see `build_log_source_relationships()`), and analytics'
+`x_mitre_mutable_elements` into two flat string lists (see
+`flatten_mutable_elements()`).
+
+Output `type` renames STIX's own `attack-pattern`/`course-of-action` to
+`attack-technique`/`attack-mitigation` (see `ENTITY_TYPE_LABEL_OVERRIDES`)
+-- CAPEC uses those same two STIX types for its own, different attack
+patterns/mitigations, so left unrenamed they'd collide as a single Neo4j
+label spanning two catalogs' worth of unrelated entities.
 """
 
 from __future__ import annotations
@@ -68,7 +81,7 @@ COURSE_OF_ACTION_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("labels",)
 MATRIX_FIELDS: Tuple[str, ...] = COMMON_FIELDS  # tactic_refs extracted to derived_relationships.json
 ANALYTIC_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_platforms", "x_mitre_mutable_elements")
 DETECTION_STRATEGY_FIELDS: Tuple[str, ...] = COMMON_FIELDS  # x_mitre_analytic_refs extracted
-DATA_COMPONENT_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_log_sources",)
+DATA_COMPONENT_FIELDS: Tuple[str, ...] = COMMON_FIELDS  # x_mitre_log_sources extracted
 DATA_SOURCE_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_collection_layers", "x_mitre_platforms")
 ASSET_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_platforms", "x_mitre_sectors")
 
@@ -94,11 +107,33 @@ RELATIONSHIP_KEY = "relationship"
 DERIVED_RELATIONSHIP_KEY = "derived-relationship"
 EXTERNAL_RELATIONSHIP_KEY = "external-relationship"
 
+# Log sources have no STIX object of their own -- synthesized from the
+# `x_mitre_log_sources`/`x_mitre_log_source_references` maps, so this key sits
+# alongside FIELDS_BY_TYPE's real STIX types rather than inside it.
+LOG_SOURCE_KEY = "log-source"
+
 HAS_TACTIC_RELATIONSHIP_TYPE = "has_tactic"
 HAS_MEMBER_RELATIONSHIP_TYPE = "has_member"
 HAS_ANALYTIC_RELATIONSHIP_TYPE = "has_analytic"
 USES_DATA_COMPONENT_RELATIONSHIP_TYPE = "uses_data_component"
+HAS_LOG_SOURCE_RELATIONSHIP_TYPE = "has_log_source"
 EXTERNAL_RELATIONSHIP_TYPE = "related-to"
+
+# Upstream writes a literal "None" string (not JSON null) for 184 absent log-source
+# channels -- normalized to "attribute absent" so it can't load as a real value.
+ABSENT_CHANNEL_SENTINEL = "None"
+
+MUTABLE_ELEMENT_NOTE_SEPARATOR = " -- "  # verified absent from every field name and description
+
+# STIX's own "attack-pattern"/"course-of-action" types are shared with CAPEC, which uses
+# them for a genuinely different entity (CAPEC's own attack patterns/mitigations, not
+# ATT&CK's techniques/mitigations) -- overridden on the output `type` field only (internal
+# dispatch below still keys off the raw STIX type) so the two catalogs' entities never
+# collide under the same label.
+ENTITY_TYPE_LABEL_OVERRIDES: Dict[str, str] = {
+    "attack-pattern": "attack-technique",
+    "course-of-action": "attack-mitigation",
+}
 
 OUTPUT_FILENAMES: Dict[str, str] = {
     "attack-pattern": "techniques.json",
@@ -114,6 +149,7 @@ OUTPUT_FILENAMES: Dict[str, str] = {
     "x-mitre-data-component": "data_components.json",
     "x-mitre-data-source": "data_sources.json",
     "x-mitre-asset": "assets.json",
+    LOG_SOURCE_KEY: "log_sources.json",
     RELATIONSHIP_KEY: "relationships.json",
     DERIVED_RELATIONSHIP_KEY: "derived_relationships.json",
     EXTERNAL_RELATIONSHIP_KEY: "external_relationships.json",
@@ -258,7 +294,15 @@ def build_detection_strategy_relationships(obj: Dict[str, Any], entity_id: Optio
     return relationships
 
 
-def build_analytic_relationships(obj: Dict[str, Any], entity_id: Optional[str], id_to_final_id: Dict[str, str]) -> List[Dict[str, Any]]:
+def clean_channel(value: Any) -> Optional[str]:
+    if not value or str(value).strip() in ("", ABSENT_CHANNEL_SENTINEL):
+        return None
+    return str(value)
+
+
+def build_analytic_relationships(
+    obj: Dict[str, Any], entity_id: Optional[str], id_to_final_id: Dict[str, str], log_source_names: Dict[str, None]
+) -> List[Dict[str, Any]]:
     if not entity_id:
         return []
     relationships = []
@@ -268,12 +312,65 @@ def build_analytic_relationships(obj: Dict[str, Any], entity_id: Optional[str], 
             continue
         target_ref = resolve_entity_id(data_component_stix_id, id_to_final_id, f"analytic {entity_id} x_mitre_log_source_references")
         extra: Dict[str, Any] = {}
-        if log_source.get("name"):
-            extra["log_source_name"] = log_source["name"]
-        if log_source.get("channel"):
-            extra["channel"] = log_source["channel"]
+        name = log_source.get("name")
+        if name:
+            # every name here is also on some data component's own x_mitre_log_sources,
+            # but register it anyway so log_source_name can never dangle
+            log_source_names[name] = None
+            extra["log_source_name"] = name
+        channel = clean_channel(log_source.get("channel"))
+        if channel:
+            extra["channel"] = channel
         relationships.append(make_relationship(entity_id, target_ref, USES_DATA_COMPONENT_RELATIONSHIP_TYPE, **extra))
     return relationships
+
+
+def build_log_source_relationships(
+    obj: Dict[str, Any], entity_id: Optional[str], log_source_names: Dict[str, None]
+) -> List[Dict[str, Any]]:
+    """Unpack a data component's `x_mitre_log_sources` list-of-{name, channel} maps.
+
+    `name` is a shared vocabulary -- 351 colon-namespaced codes
+    (`WinEventLog:Security`, `AWS:CloudTrail`) reused across components -- so it
+    becomes its own entity, which also gives the `log_source_name` already carried
+    on `uses_data_component` edges a real node to resolve against. `channel` is
+    free-text analyst prose (43% of values run past 60 characters), so it stays an
+    edge attribute rather than becoming part of the log source's identity.
+    """
+    if not entity_id:
+        return []
+    relationships = []
+    for log_source in obj.get("x_mitre_log_sources", []) or []:
+        name = log_source.get("name")
+        if not name:
+            continue
+        log_source_names[name] = None
+        channel = clean_channel(log_source.get("channel"))
+        extra = {"channel": channel} if channel else {}
+        relationships.append(make_relationship(entity_id, name, HAS_LOG_SOURCE_RELATIONSHIP_TYPE, **extra))
+    return relationships
+
+
+def flatten_mutable_elements(record: Dict[str, Any]) -> None:
+    """Replace an analytic's `x_mitre_mutable_elements` maps with two flat string lists.
+
+    The `field` names are the queryable half -- 25 of them are shared by 10 or more
+    analytics -- so they become a plain list. `description` is per-analytic tuning
+    prose (5,145 distinct strings across 5,177 elements, so not a property of the
+    field itself); it is kept as self-labelling `"field -- description"` strings
+    rather than a parallel list, since Cypher can't enforce index alignment.
+    """
+    elements = record.pop("x_mitre_mutable_elements", None) or []
+    fields = list(dict.fromkeys(e["field"] for e in elements if e.get("field")))
+    if fields:
+        record["x_mitre_mutable_element_fields"] = fields
+    notes = [
+        f"{e['field']}{MUTABLE_ELEMENT_NOTE_SEPARATOR}{e['description']}"
+        for e in elements
+        if e.get("field") and e.get("description")
+    ]
+    if notes:
+        record["x_mitre_mutable_element_notes"] = notes
 
 
 def resolve_canonical_ids(objects: Sequence[Dict[str, Any]]) -> Dict[str, str]:
@@ -345,10 +442,12 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             tactic_by_domain_shortname[(domain, obj.get("x_mitre_shortname"))] = final_id
 
     result: Dict[str, List[Dict[str, Any]]] = {obj_type: [] for obj_type in FIELDS_BY_TYPE}
+    result[LOG_SOURCE_KEY] = []
     result[RELATIONSHIP_KEY] = []
     result[DERIVED_RELATIONSHIP_KEY] = []
     result[EXTERNAL_RELATIONSHIP_KEY] = []
     dropped_counts: Dict[str, int] = {}
+    log_source_names: Dict[str, None] = {}  # insertion-ordered set, sorted at the end
 
     for obj in objects:
         obj_type = str(obj.get("type") or "")
@@ -376,6 +475,10 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
 
         record = filter_object(obj, fields)
         record = {"id": final_id, "stix_id": obj["id"], **record}
+        if obj_type in ENTITY_TYPE_LABEL_OVERRIDES:
+            record["type"] = ENTITY_TYPE_LABEL_OVERRIDES[obj_type]
+        if obj_type == "x-mitre-analytic":
+            flatten_mutable_elements(record)
         result[obj_type].append(record)
 
         if obj_type == "attack-pattern":
@@ -386,7 +489,11 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
         elif obj_type == "x-mitre-detection-strategy":
             result[DERIVED_RELATIONSHIP_KEY].extend(build_detection_strategy_relationships(obj, final_id, id_to_final_id))
         elif obj_type == "x-mitre-analytic":
-            result[DERIVED_RELATIONSHIP_KEY].extend(build_analytic_relationships(obj, final_id, id_to_final_id))
+            result[DERIVED_RELATIONSHIP_KEY].extend(build_analytic_relationships(obj, final_id, id_to_final_id, log_source_names))
+        elif obj_type == "x-mitre-data-component":
+            result[DERIVED_RELATIONSHIP_KEY].extend(build_log_source_relationships(obj, final_id, log_source_names))
+
+    result[LOG_SOURCE_KEY] = [{"id": name, "type": LOG_SOURCE_KEY, "name": name} for name in sorted(log_source_names)]
 
     dropped_summary = ", ".join(f"{count} {obj_type}" for obj_type, count in sorted(dropped_counts.items()))
     print(f"[mitre-attack-parser] parsed {len(objects)} merged objects; dropped {dropped_summary or 'nothing'}")
@@ -449,6 +556,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{counts['x-mitre-data-component']} data components, "
             f"{counts['x-mitre-data-source']} data sources, "
             f"{counts['x-mitre-asset']} assets, "
+            f"{counts[LOG_SOURCE_KEY]} log sources, "
             f"{counts[RELATIONSHIP_KEY]} relationships, "
             f"{counts[DERIVED_RELATIONSHIP_KEY]} derived relationships, "
             f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external relationships "
