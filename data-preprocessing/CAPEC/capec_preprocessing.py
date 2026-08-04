@@ -42,9 +42,14 @@ records in `attack_pattern_relationships.json`:
 
 `x_capec_consequences` and `x_capec_skills_required` are the only two fields
 in CAPEC's output that were maps rather than scalars/scalar lists -- illegal
-as Neo4j properties -- so both are unpacked into their own entity files plus
-edges. See `build_consequence_relationships()` and
-`build_skill_relationships()`.
+as Neo4j properties. `x_capec_consequences` is unpacked into its own entity
+file plus edges (see `build_consequence_relationships()`).
+`x_capec_skills_required` is dropped outright: it is not carried on the
+attack-pattern record (`ATTACK_PATTERN_FIELDS` is a whitelist and omits it),
+and it no longer becomes `requires_skill` edges or `skill-level` entities
+either. Those three nodes existed only as edge targets, so removing the edges
+removes their only reason to exist -- the same call this project already made
+for CWE's alias "entities" and D3FEND's mirrored weaknesses.
 """
 
 from __future__ import annotations
@@ -56,8 +61,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-# x_capec_consequences / x_capec_skills_required are extracted to their own
-# entities + edges rather than kept here -- both were maps. See module docstring.
+# x_capec_consequences is extracted to its own entities + edges rather than kept
+# here, and x_capec_skills_required is dropped -- both were maps, illegal as Neo4j
+# properties. See module docstring.
 ATTACK_PATTERN_FIELDS: Tuple[str, ...] = (
     "id",
     "name",
@@ -114,7 +120,6 @@ HIERARCHY_REF_FIELDS: Dict[str, str] = {
 
 PEER_OF_RELATIONSHIP_TYPE = "peer_of"
 HAS_CONSEQUENCE_RELATIONSHIP_TYPE = "has_consequence"
-REQUIRES_SKILL_RELATIONSHIP_TYPE = "requires_skill"
 
 ATTACK_PATTERN_RELATIONSHIP_KEY = "attack-pattern-relationship"
 
@@ -125,7 +130,6 @@ ATTACK_PATTERN_RELATIONSHIP_KEY = "attack-pattern-relationship"
 # rather than a single shared node -- these preprocessors run independently and
 # can't coordinate a joint id space.
 CONSEQUENCE_ENTITY_TYPE = "consequence"
-SKILL_LEVEL_ENTITY_TYPE = "skill-level"
 
 # CAPEC writes the Access Control scope with an underscore where CWE writes a space;
 # normalized to CWE's spelling so the 9 scope values are one shared vocabulary.
@@ -140,7 +144,6 @@ OUTPUT_FILENAMES: Dict[str, str] = {
     "attack-pattern": "attack_patterns.json",
     "course-of-action": "courses_of_action.json",
     CONSEQUENCE_ENTITY_TYPE: "consequences.json",
-    SKILL_LEVEL_ENTITY_TYPE: "skill_levels.json",
     "relationship": "relationships.json",
     EXTERNAL_RELATIONSHIP_KEY: "external_relationships.json",
     ATTACK_PATTERN_RELATIONSHIP_KEY: "attack_pattern_relationships.json",
@@ -288,27 +291,6 @@ def build_consequence_relationships(
     return relationships
 
 
-def build_skill_relationships(
-    obj: Dict[str, Any], capec_id: int, skill_levels: Dict[str, str]
-) -> List[Dict[str, Any]]:
-    """Unpack `x_capec_skills_required` (a level -> prose map) into edges pointing at
-    one of three `skill-level` entities, with the prose as an edge attribute.
-
-    Unlike ATT&CK's mutable elements -- where the map keys were a 2,892-value
-    long tail not worth nodes -- the keys here are a closed 3-value enum
-    (Low/Medium/High), so promoting them makes "every attack pattern needing high
-    skill" a one-hop query. The prose is per-attack-pattern, so it goes on the edge.
-    """
-    source_ref = f"CAPEC-{capec_id}"
-    relationships = []
-    for level, prose in (obj.get("x_capec_skills_required") or {}).items():
-        entity_id = f"{SKILL_LEVEL_ENTITY_TYPE}--{level}"
-        skill_levels[level] = entity_id
-        extra = {"description": prose} if str(prose or "").strip() else {}
-        relationships.append(make_relationship(source_ref, entity_id, REQUIRES_SKILL_RELATIONSHIP_TYPE, **extra))
-    return relationships
-
-
 def build_peer_relationships(attack_patterns: Sequence[Dict[str, Any]], id_to_capec_id: Dict[str, int]) -> List[Dict[str, Any]]:
     """peer_of is symmetric but not consistently reciprocal in the source data, so dedupe
     to one edge per unordered pair (canonical direction: lower capec_id -> higher capec_id)."""
@@ -348,11 +330,9 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     result: Dict[str, List[Dict[str, Any]]] = {obj_type: [] for obj_type in FIELDS_BY_TYPE}
     result[EXTERNAL_RELATIONSHIP_KEY] = []
     result[CONSEQUENCE_ENTITY_TYPE] = []
-    result[SKILL_LEVEL_ENTITY_TYPE] = []
     result[ATTACK_PATTERN_RELATIONSHIP_KEY] = build_peer_relationships(attack_patterns, id_to_capec_id)
     dropped_counts: Dict[str, int] = {}
     consequence_ids: Dict[Tuple[str, str], str] = {}
-    skill_levels: Dict[str, str] = {}
 
     for obj in objects:
         obj_type = str(obj.get("type") or "")
@@ -364,7 +344,6 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(
                 build_consequence_relationships(obj, capec_id, consequence_ids, result[CONSEQUENCE_ENTITY_TYPE])
             )
-            result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(build_skill_relationships(obj, capec_id, skill_levels))
             continue
         if obj_type == "relationship":
             record = filter_object(obj, RELATIONSHIP_FIELDS)
@@ -381,10 +360,6 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
         dropped_counts[obj_type] = dropped_counts.get(obj_type, 0) + 1
 
     result[CONSEQUENCE_ENTITY_TYPE].sort(key=lambda record: record["id"])
-    result[SKILL_LEVEL_ENTITY_TYPE] = [
-        {"id": entity_id, "type": SKILL_LEVEL_ENTITY_TYPE, "name": level}
-        for level, entity_id in sorted(skill_levels.items())
-    ]
 
     dropped_summary = ", ".join(f"{count} {obj_type}" for obj_type, count in sorted(dropped_counts.items()))
     print(f"[capec-parser] parsed {len(objects)} objects; dropped {dropped_summary or 'nothing'}")
@@ -420,8 +395,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default=str(default_output_dir),
         help=(
             "Directory to write attack_patterns.json / courses_of_action.json / "
-            "consequences.json / skill_levels.json / relationships.json / "
-            "external_relationships.json / "
+            "consequences.json / relationships.json / external_relationships.json / "
             f"attack_pattern_relationships.json (default: {default_output_dir})"
         ),
     )
@@ -442,7 +416,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{counts['attack-pattern']} attack-patterns, "
             f"{counts['course-of-action']} courses-of-action, "
             f"{counts[CONSEQUENCE_ENTITY_TYPE]} consequences, "
-            f"{counts[SKILL_LEVEL_ENTITY_TYPE]} skill levels, "
             f"{counts['relationship']} relationships, "
             f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external relationships, "
             f"{counts[ATTACK_PATTERN_RELATIONSHIP_KEY]} attack-pattern relationships "

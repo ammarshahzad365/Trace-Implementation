@@ -6,10 +6,10 @@ field (`x-mitre-analytic`, `course-of-action`, `cvss-v3-score`) so the files sta
 faithful to CWE/CAPEC/CVE/ATT&CK/D3FEND and remain useful outside a graph. Neo4j
 wants something different, for two reasons:
 
-- 19 of the 33 `type` values contain a hyphen, which is not a valid bare Cypher
+- 18 of the 32 `type` values contain a hyphen, which is not a valid bare Cypher
   identifier -- `MATCH (t:attack-technique)` is a syntax error, so every query would
   need backticks forever. Labels are PascalCase here instead.
-- 4 of the 95 `relationship_type` values have the same problem (`related-to`,
+- 4 of the 93 `relationship_type` values have the same problem (`related-to`,
   `revoked-by`, `attributed-to`, `subtechnique-of`). Relationship types are
   UPPER_SNAKE, the Neo4j convention, derived mechanically.
 
@@ -47,7 +47,6 @@ NODE_LABELS: Dict[str, str] = {
     # CAPEC
     "attack-pattern": "AttackPattern",
     "course-of-action": "CourseOfAction",
-    "skill-level": "SkillLevel",
     # ATT&CK
     "attack-technique": "AttackTechnique",
     "attack-mitigation": "AttackMitigation",

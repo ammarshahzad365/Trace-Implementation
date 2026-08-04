@@ -1,8 +1,8 @@
 # Loading the dataset into Neo4j
 
 Turns the five preprocessed source folders under `data-preprocessing/` into a single
-Neo4j graph: **1,107,176 nodes across 33 labels** and **1,135,867 relationships across
-94 types**.
+Neo4j graph: **1,107,173 nodes across 32 labels** and **1,135,503 relationships across
+93 types**.
 
 ```
 py generate_load_cypher.py          # validates the data, writes load.cypher
@@ -40,8 +40,9 @@ If load time ever becomes the bottleneck, the CSV route is the thing to reach fo
 The load leans on one property of the preprocessed data: **nothing nests**. Neo4j
 properties hold scalars and scalar arrays, never maps, so `SET n = value` maps a whole
 record to properties in a single step with no per-field handling. Both sources that
-used to nest (ATT&CK's log sources and mutable elements, CAPEC's consequences and
-skill levels) were unpacked upstream precisely so this holds.
+used to nest (ATT&CK's log sources and mutable elements, CAPEC's consequences) were
+unpacked upstream precisely so this holds — CAPEC's other map field,
+`x_capec_skills_required`, was dropped rather than unpacked.
 
 ## Naming: `type` -> label, `relationship_type` -> type
 
@@ -50,12 +51,12 @@ The preprocessed JSON keeps each catalog's own vocabulary (`x-mitre-analytic`,
 usable outside a graph. `graph_schema.py` maps that vocabulary to Cypher-friendly
 names at load time. Two reasons this is not cosmetic:
 
-- **19 of the 33 `type` values contain a hyphen**, which is not a valid bare Cypher
+- **18 of the 32 `type` values contain a hyphen**, which is not a valid bare Cypher
   identifier. `MATCH (t:attack-technique)` is a syntax error; without the mapping,
   every query against most of the graph would need backticks forever. Labels become
   PascalCase (`AttackTechnique`, `CvssV3Score`, `LogSource`).
-- **4 of the 94 relationship types** have the same problem (`related-to`,
-  `revoked-by`, `attributed-to`, `subtechnique-of`). All 94 become `UPPER_SNAKE`
+- **4 of the 93 relationship types** have the same problem (`related-to`,
+  `revoked-by`, `attributed-to`, `subtechnique-of`). All 93 become `UPPER_SNAKE`
   mechanically (`RELATED_TO`, `HAS_CVSS_V3_SCORE`).
 
 Two mappings are deliberately not mechanical. D3FEND's bare `technique`/`tactic`
@@ -77,7 +78,7 @@ constraint on `:Entity(id)`.
 
 This exists because an edge row names its endpoints by bare id — `source_ref:
 "CVE-1999-0001"` — and says nothing about what kind of thing that is. Without one
-label spanning every entity, resolving an endpoint would mean either trying all 33
+label spanning every entity, resolving an endpoint would mean either trying all 32
 labels or threading endpoint types through the preprocessors. With it, each of the
 1.1M edges resolves in one indexed lookup.
 
@@ -101,7 +102,7 @@ this correctly and calls `db.awaitIndexes()` before loading nodes.
 
 Dangling edge endpoints are reported but not fatal — they're skipped by the `MATCH` in
 each edge statement rather than creating phantom nodes, and the count is written into
-`load.cypher`'s header. Currently **4** of 1,135,867 endpoints dangle, all in
+`load.cypher`'s header. Currently **4** of 1,135,503 endpoints dangle, all in
 `CWE/external_relationships.json`: CWE cites four CVEs as observed examples that the
 CVE side of this project doesn't contain — one (`CVE-2019-1135`) because NVD marks it
 `Rejected` and the CVE preprocessor drops all 17,655 rejected records, the rest
@@ -123,6 +124,6 @@ load:
   bundles CVE→CWE, CWE→CVE, CAPEC→CWE, and CAPEC→ATT&CK, distinguished only by a
   `source_name` property. Splitting it into typed edges would make the main
   cross-source bridge far more direct to traverse.
-- **63 of the 94 relationship types come from D3FEND's artifact verbs** (`analyzes`,
+- **63 of the 93 relationship types come from D3FEND's artifact verbs** (`analyzes`,
   `filters`, `may_modify`, …), many with a single edge. They could stay distinct or
   collapse into one `ACTS_ON` with the verb as a property.

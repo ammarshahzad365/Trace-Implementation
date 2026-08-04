@@ -74,9 +74,10 @@ crawler's own output) and `--output-dir` (default: this folder).
 
 Neo4j properties hold scalars or scalar arrays, never maps, so a `map`-valued
 field can't be loaded as a property at all. `x_capec_consequences` and
-`x_capec_skills_required` were the only two such fields in this dataset — both
-are now unpacked into their own entity files plus edges (every other field is
-already a scalar or a `list[str]`).
+`x_capec_skills_required` were the only two such fields in this dataset (every
+other field is already a scalar or a `list[str]`). `x_capec_consequences` is
+unpacked into its own entity file plus edges; `x_capec_skills_required` is
+dropped entirely — see below.
 
 **`x_capec_consequences`** (a scope → impact-list map on 369 attack patterns)
 becomes **`consequences.json`** plus 1,563 `has_consequence` edges. Two things
@@ -104,13 +105,20 @@ CAPEC also writes the Access Control scope as `Access_Control` where CWE writes
 values an exact subset of CWE's rather than a near-miss.
 
 **`x_capec_skills_required`** (a skill-level → prose map on 296 attack
-patterns) becomes **`skill_levels.json`** — 3 records, `skill-level--Low`/
-`--Medium`/`--High` — plus 364 `requires_skill` edges carrying the prose as the
-edge's `description` (2 are blank upstream and simply omit it). The keys here
-are a closed 3-value enum, so promoting them to nodes makes "every attack
-pattern needing high skill" a one-hop query; contrast ATT&CK's mutable
-elements, whose 2,892-value long tail was flattened to a string list instead
-precisely because it *wasn't* a real vocabulary.
+patterns) is **dropped**, not extracted. It previously became a
+`skill_levels.json` of 3 records (`skill-level--Low`/`--Medium`/`--High`) plus
+364 `requires_skill` edges carrying the prose as the edge's `description`. A
+skill level is a coarse three-value judgement about an attack pattern, not a
+thing this graph has anything to say about: the three nodes existed only as
+those edges' targets, nothing else ever pointed at them, and no traversal
+crosses them to reach another entity. Removing the edges therefore removes the
+nodes' only reason to exist — the same call already made for CWE's alias
+"entities" and D3FEND's mirrored weaknesses.
+
+The per-attack-pattern prose goes with them (364 strings, only ever stored as
+that edge attribute). If it's wanted back later, the shape to use is a
+self-labelling `list[str]` property on the attack pattern — `"High -- <prose>"`,
+the pattern CWE's `alias_notes` uses — not a re-promotion to nodes.
 
 One attack pattern (`CAPEC-132`) lists the identical `(Integrity, Modify Data)`
 consequence twice upstream; the exact duplicate is dropped, which is why there
@@ -118,14 +126,13 @@ are 1,563 edges from 1,564 source pairs.
 
 ## Output
 
-Seven JSON files, each a plain array of trimmed records:
+Six JSON files, each a plain array of trimmed records:
 
 | File | Count | Contents |
 |---|---|---|
 | `attack_patterns.json` | 615 | CAPEC attack patterns — id (`CAPEC-N`), stix_id, name, description, type, and the remaining `x_capec_*` analytic fields (abstraction, domains, prerequisites, typical severity, likelihood of attack, resources required, example instances), plus `extended_description` and `aliases` |
 | `courses_of_action.json` | 877 | Mitigations — id (STIX id — CAPEC has no human-readable numbering for mitigations), name, description, type only (CAPEC's own `name` for these is a generic placeholder, not a real title) |
 | `consequences.json` | 46 | Distinct `(scope, impact)` consequences (`type: "consequence"`, same shape and label as CWE's own `consequences.json`) — id (`consequence--<uuid5>`), scope, impact. Unpacked from the removed `x_capec_consequences` map |
-| `skill_levels.json` | 3 | Attacker skill levels (`type: "skill-level"`) — id (`skill-level--Low`/`--Medium`/`--High`), name. Unpacked from the removed `x_capec_skills_required` map |
 | `relationships.json` | 1,172 | `course-of-action --mitigates--> attack-pattern` edges — id, type, relationship_type, source_ref (course-of-action STIX id), target_ref (`CAPEC-N`), created |
 | `external_relationships.json` | 1,486 | `CAPEC-N --related-to--> CWE-N` / `--related-to--> T####` edges, derived from each attack-pattern's `cwe`/`ATTACK` external_references — id, type, relationship_type, source_ref, target_ref, source_name (`cwe` or `ATTACK`) |
-| `attack_pattern_relationships.json` | 2,639 | Edges derived from attack-patterns' removed embedded fields — id, type, relationship_type, source_ref, target_ref. `relationship_type` is one of `has_consequence` (1,563, → consequence, with the split-out `note`), `requires_skill` (364, → skill-level, with the prose as `description`), `child_of` (533), `can_precede` (162), `peer_of` (17, deduped per unordered pair) |
+| `attack_pattern_relationships.json` | 2,275 | Edges derived from attack-patterns' removed embedded fields — id, type, relationship_type, source_ref, target_ref. `relationship_type` is one of `has_consequence` (1,563, → consequence, with the split-out `note`), `child_of` (533), `can_precede` (162), `peer_of` (17, deduped per unordered pair) |
