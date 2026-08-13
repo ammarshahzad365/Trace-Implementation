@@ -86,9 +86,10 @@ entity files plus `has_cvss_v2_score` / `has_cvss_v3_score` /
   `cvssData` fields (`version`, `vectorString`, `accessVector`,
   `accessComplexity`, `authentication`, `confidentialityImpact`,
   `integrityImpact`, `availabilityImpact`, `baseScore`) are merged into one
-  flat record. The entry's own `type` (`Primary`/`Secondary`) is renamed
-  `assessment_type` to avoid colliding with the record's own
-  `type: "cvss-v2-score"` discriminator.
+  flat record, from which reduction 1 below then drops everything the vector
+  string and base score already encode. The entry's own `type`
+  (`Primary`/`Secondary`) is renamed `assessment_type` to avoid colliding with
+  the record's own `type: "cvss-v2-score"` discriminator.
 - `cvssMetricV30` / `cvssMetricV31` → `cvss_v3_scores.json`, combined into
   one file: the two versions have an identical shape and only ever differ
   in `version`'s own value (`"3.0"` vs `"3.1"`), which stays on the
@@ -96,7 +97,9 @@ entity files plus `has_cvss_v2_score` / `has_cvss_v3_score` /
   `exploitabilityScore`, `impactScore`, `version`, `vectorString`,
   `attackVector`, `attackComplexity`, `privilegesRequired`,
   `userInteraction`, `scope`, `confidentialityImpact`, `integrityImpact`,
-  `availabilityImpact`, `baseScore`, `baseSeverity`.
+  `availabilityImpact`, `baseScore`, `baseSeverity` — of which reduction 1
+  below keeps only `source`, `assessment_type`, `version`, `vectorString` and
+  `baseScore`.
 - `cvssMetricV40` → `cvss_v4_scores.json`. Base metrics (`version`,
   `vectorString`, `baseScore`, `baseSeverity`, `attackVector`,
   `attackComplexity`, `attackRequirements`, `privilegesRequired`,
@@ -104,7 +107,9 @@ entity files plus `has_cvss_v2_score` / `has_cvss_v3_score` /
   `vulnAvailabilityImpact`, `subConfidentialityImpact`/
   `subIntegrityImpact`/`subAvailabilityImpact`, `exploitMaturity`) and
   supplemental metrics (`Safety`, `Automatable`, `Recovery`, `valueDensity`,
-  `vulnerabilityResponseEffort`, `providerUrgency`) are kept. The 14
+  `vulnerabilityResponseEffort`, `providerUrgency`) are flattened out of the
+  nesting here, then all but `vectorString`/`baseScore` are dropped again by
+  reduction 1 below, which recovers them from the vector string. The 14
   environmental-override fields (`confidentialityRequirement`/
   `integrityRequirement`/`availabilityRequirement`,
   `modifiedAttackVector`/`modifiedAttackComplexity`/
@@ -136,6 +141,53 @@ get a deterministic `relationship--<uuid5>` id, seeded from
 `(source_ref, relationship_type, target_ref)` — reruns against the same
 input produce byte-identical output.
 
+## Three reductions on the score records
+
+Severity was two-thirds of the loaded graph: 746,387 score/assessment records
+against 346,947 vulnerabilities, none of which the CVE → CWE → CAPEC → ATT&CK
+→ D3FEND trace ever traverses. Three rules cut that to 593,945 records and the
+score files from 476 MB to 192 MB, without losing anything that can't be
+recomputed.
+
+**1. Derived fields are dropped.** Every enum metric is already spelled out in
+`vectorString` (`AV:N/AC:L/PR:N/…`); `baseSeverity` is a fixed band table over
+`baseScore`; `exploitabilityScore` and `impactScore` are the published CVSS
+formulas over the vector's own metrics. Before removing them, all three were
+reconstructed from `vectorString`/`baseScore` alone and diffed against NVD's
+values: **0 mismatches across all 583,026 score records** (194,545 v2, 359,055
+v3, 29,426 v4). Each CVSS record now carries `id`, `type`, `source`,
+`assessment_type`, `version`, `vectorString`, `baseScore` — and on v2, the five
+NVD booleans (`acInsufInfo`, `obtainAllPrivilege`, `obtainOtherPrivilege`,
+`obtainUserPrivilege`, `userInteractionRequired`) that have no vector
+representation and so are genuinely independent data. Record count unchanged;
+roughly a third of the stored bytes.
+
+For v4 the supplemental metrics go too — CVSS v4.0 omits a supplemental metric
+from the vector string exactly when it is `NOT_DEFINED`, which is what 97%+ of
+them are, so the vector round-trips them as well.
+
+**2. A v2 score is dropped when the same CVE also has a v3 score** — 122,022
+records. CVSS v2 has been deprecated since 2019 and `data-loading`'s enrichment
+pass already ranks it below every v3, so those records were never the ones
+anything read. v2 is kept wherever it is genuinely the only assessment, which is
+72,414 CVEs. The one behavioural change downstream: a CVE holding a v2 Primary
+*and* a v3 Secondary now summarises from the v3 Secondary rather than the v2
+Primary, which is the newer standard winning.
+
+**3. A Secondary score that echoes a Primary is dropped** — 30,420 records. A CNA
+score asserting exactly what NVD's own Primary asserts spends a record and an
+edge to register agreement. One that *differs* is real scoring disagreement and
+is kept, so a surviving `Secondary` now carries information it didn't before.
+
+Rules 2 and 3 only ever drop a record that has a surviving sibling on the same
+CVE, so no CVE loses its severity data outright. The id seed uses each entry's
+position in the *raw* input list, so dropping a record never re-ids the ones that
+survive alongside it, and reruns stay byte-identical.
+
+Reconstructing a dropped enum field means parsing `vectorString` against the CVSS
+specification's own abbreviation table; `data-loading/catalog/enrichments.py`
+does the equivalent for `baseSeverity` in Cypher.
+
 ## Output
 
 Seven JSON files, each a plain array of records:
@@ -143,9 +195,9 @@ Seven JSON files, each a plain array of records:
 | File | Count | Contents |
 |---|---|---|
 | `vulnerabilities.json` | 346,947 | CVE records — id (`CVE-N`), stix_id, description, type, spec_version, created/modified, vuln status, source identifier |
-| `cvss_v2_scores.json` | 194,545 | Flattened CVSS v2.0 scores |
-| `cvss_v3_scores.json` | 359,055 | Flattened CVSS v3.0/v3.1 scores (`version` disambiguates) |
-| `cvss_v4_scores.json` | 29,426 | Flattened CVSS v4.0 scores (environmental-override fields dropped) |
+| `cvss_v2_scores.json` | 72,472 | Flattened CVSS v2.0 scores (was 194,545 before the reductions below) |
+| `cvss_v3_scores.json` | 328,687 | Flattened CVSS v3.0/v3.1 scores (`version` disambiguates; was 359,055) |
+| `cvss_v4_scores.json` | 29,425 | Flattened CVSS v4.0 scores (environmental-override fields dropped; was 29,426) |
 | `ssvc_assessments.json` | 163,361 | Flattened SSVC v2.0.3 triage assessments |
-| `relationships.json` | 746,387 | `CVE-N --has_cvss_v2_score/has_cvss_v3_score/has_cvss_v4_score/has_ssvc_assessment--> <score id>` edges — id, type, relationship_type, source_ref, target_ref |
+| `relationships.json` | 593,945 | `CVE-N --has_cvss_v2_score/has_cvss_v3_score/has_cvss_v4_score/has_ssvc_assessment--> <score id>` edges — id, type, relationship_type, source_ref, target_ref (was 746,387) |
 | `external_relationships.json` | 323,027 | `CVE-N --related-to--> CWE-N` edges, `source_name: "cwe"` — id, type, relationship_type, source_ref, target_ref, source_name |
