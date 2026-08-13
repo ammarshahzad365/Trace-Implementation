@@ -119,7 +119,7 @@ import.
 
 | File | Lines | Contains |
 |---|---|---|
-| `sources/cve.py` | 34 | 7 files — 1,093,334 nodes, 1,069,414 edge rows |
+| `sources/cve.py` | 38 | 7 files — 940,892 nodes, 916,972 edge rows |
 | `sources/cwe.py` | 35 | 10 files — 5,056 nodes, 18,339 edge rows |
 | `sources/mitre_attack.py` | 47 | 17 files — 6,052 nodes, 36,346 edge rows |
 | `sources/capec.py` | 27 | 6 files — 1,538 nodes, 4,930 edge rows |

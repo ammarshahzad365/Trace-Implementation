@@ -97,7 +97,7 @@ The design target for all five: **output that a graph can load directly.**
 
 | Source | Files | Nodes | Edge rows |
 |---|---|---|---|
-| CVE | 7 | 1,093,334 | 1,069,414 |
+| CVE | 7 | 940,892 | 916,972 |
 | MITRE ATT&CK | 17 | 6,052 | 36,346 |
 | CWE | 10 | 5,056 | 18,339 |
 | CAPEC | 6 | 1,538 | 4,930 |
@@ -157,13 +157,23 @@ Six stages, run in order or individually via `--stage`: `constraints` → `nodes
   collision after stripping is a hard error, not last-write-wins.
 - **Provenance on nodes is called `catalog`, not `source`** — CVSS/SSVC records
   already own a `source` field holding the assessing organisation, and taking that
-  name would have silently overwritten it on 746,387 nodes.
-- **CVSS is both summarised and kept.** All 746,387 score nodes load, *and* each
-  `:Vulnerability` gets flat `cvss_base_score`/`_base_severity`/`_vector_string`/
-  `_version` properties via a post-load Cypher pass (v3.1 → v3.0 → v4.0 → v2.0,
-  NVD `Primary` before any CNA `Secondary`). Done after loading because the score
-  files don't record which CVE they belong to — that's in `relationships.json`, so
-  rebuilding the join in Python would mean holding two ~700,000-entry maps.
+  name would have silently overwritten it on 593,945 nodes.
+- **CVSS is reduced, then both summarised and kept.** All 593,945 score nodes
+  load, *and* each `:Vulnerability` gets flat
+  `cvss_base_score`/`_base_severity`/`_vector_string`/`_version` properties via a
+  post-load Cypher pass (v3.1 → v3.0 → v4.0 → v2.0, NVD `Primary` before any CNA
+  `Secondary`). Done after loading because the score files don't record which CVE
+  they belong to — that's in `relationships.json`, so rebuilding the join in
+  Python would mean holding two very large maps. `cvss_base_severity` is computed
+  by that pass rather than copied, since it is a band table over `base_score`.
+- **The score records were 746,387 before three preprocessing reductions.**
+  `cve_preprocessing.py` now drops (1) every CVSS field that `vectorString` or
+  `baseScore` already encodes — verified reconstructible with 0 mismatches across
+  all 583,026 score records before removal; (2) v2 scores on a CVE that also has a
+  v3 score (122,022); (3) Secondary scores asserting exactly what a Primary
+  asserts (30,420). Score files fell from 476 MB to 192 MB. Rules 2 and 3 only
+  drop records that have a surviving sibling, so no CVE lost its severity data,
+  and a surviving `Secondary` now means the CNA genuinely disagreed with NVD.
 
 ### Two things caught by validation that the plan had wrong
 
@@ -196,6 +206,12 @@ Live upstream comparison, as of the last check:
   catch it up, then re-run stages 2 and 3.
 
 ### Stage 3 — the loaded graph
+
+> **These figures predate the CVSS reductions (§4) and the graph has not been
+> reloaded since.** Every count below was measured against a load built from the
+> old 746,387-record score files. The trace-path findings are unaffected — nothing
+> in the trace touches a score node — but the node, relationship and timing totals
+> will drop by roughly 152,000 nodes and 152,000 relationships on the next load.
 
 Full load from an empty database, Neo4j 5.26.28 community in Docker:
 
@@ -259,15 +275,20 @@ Confirmed by query rather than inferred:
 
 ## 7. What's next
 
-1. **Catch up the stale CVE data** (§5), then re-run stages 2 and 3.
-2. **Query the graph and validate it against the research questions.** Start from
+1. **Reload the graph.** Stage 2's output has been re-generated with the CVSS
+   reductions (§4) but stage 3 has not been re-run, so the live database still
+   holds the old 746,387 score nodes and every score node in it still carries the
+   now-dropped derived properties. Re-run `data-loading/` against an empty
+   database before trusting any count queried from it.
+2. **Catch up the stale CVE data** (§5), then re-run stages 2 and 3.
+3. **Query the graph and validate it against the research questions.** Start from
    `data-loading/queries.cypher` — particularly the coverage queries ("which
    weaknesses have no route to any defence?"), which are the ones a table-shaped
    database is worst at and the likeliest source of paper findings.
-3. **The text-IE pass is still not started.** `Prompts/` has templates for it. The
+4. **The text-IE pass is still not started.** `Prompts/` has templates for it. The
    scoped target: ~175 CVE mentions found in ATT&CK free text and ~59 in CAPEC free
    text, which the structured fields don't capture. If built, tag these as a
    separate, lower-confidence relationship type (e.g. `MENTIONS`) — never silently
    merged with the structured edges, since their provenance and reliability differ.
-4. **Optional modelling cleanups**, none blocking: merge the 4 duplicate
+5. **Optional modelling cleanups**, none blocking: merge the 4 duplicate
    `Consequence` pairs (§6.2); reconsider the CPE/configurations gap (§6.1).

@@ -35,7 +35,7 @@ Every node gets a property naming which of the five catalogs it came from. It is
 deliberately **not** called `source`: CVSS score and SSVC assessment records
 already carry their own `source` field, holding the identity of the assessing
 organisation (`nvd@nist.gov`, or a CNA's uuid). Naming the provenance property
-`source` would silently overwrite that on 746,387 nodes -- the same class of
+`source` would silently overwrite that on 593,945 nodes -- the same class of
 collision the prefix-stripping guard exists to catch, arriving through a
 different door. `stages/nodes.py` refuses to load if a record already has a field
 by this name.

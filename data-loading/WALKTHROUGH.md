@@ -164,8 +164,12 @@ imaginable:
 3. saves that memory to disk (`.cache/registry-*.pickle`) so a future run can skip
    the reading entirely.
 
-Result: **1,107,173 dots** — CWE 5,056 · CAPEC 1,538 · CVE 1,093,334 ·
-ATT&CK 6,052 · D3FEND 1,193. (Yes: CVE is 96% of the graph. More on that later.)
+Result: **954,731 dots** — CWE 5,056 · CAPEC 1,538 · CVE 940,892 ·
+ATT&CK 6,052 · D3FEND 1,193. (Yes: CVE is 95% of the graph. More on that later.)
+
+> The step timings quoted in this walkthrough come from a load that ran before
+> `data-preprocessing/` started reducing the CVSS records, when CVE contributed
+> 1,093,334 dots. The counts here are the current ones; the seconds are not.
 
 ### Step 3 — `edges` (94 seconds) — *the easy arrows*
 
@@ -194,14 +198,21 @@ million dots.
 
 ### Step 5 — `enrich` (89 seconds) — *stick the important sticker on the front*
 
-Half the graph is severity data: 746,387 score cards dangling off 346,947 CVEs.
-Nothing in the five-step walk goes through them — but "show me the *critical* CVEs
-with a full trace to a defence" is a question you'd ask constantly, and it
-shouldn't cost an extra hop every time.
+The biggest single thing in the graph is severity data: 593,945 score cards
+dangling off 346,947 CVEs. Nothing in the five-step walk goes through them — but
+"show me the *critical* CVEs with a full trace to a defence" is a question you'd
+ask constantly, and it shouldn't cost an extra hop every time.
 
 So this step copies each CVE's headline score **onto the CVE dot itself**
 (`cvss_base_score`, `cvss_base_severity`, `cvss_vector_string`, `cvss_version`)
 while leaving all the detailed score dots in place.
+
+`cvss_base_severity` is the one it *computes* rather than copies — "CRITICAL" is
+just a label for "9.0 and up", so the score cards stopped carrying it. That's one
+of three trims `data-preprocessing/` now applies: it also drops any metric the
+vector string already spells out, drops v2 score cards for CVEs that have a v3
+one, and drops a CNA's score card when it says exactly what NVD's already says.
+746,387 cards became 593,945 without losing a fact.
 
 Why afterwards, in the database, instead of in Python? Because the score files
 don't say which CVE they belong to — that's in a *different* file. Rebuilding
@@ -301,7 +312,7 @@ still fail to answer the one question it was built for.
 |---|---|
 | `__init__.py` | Re-exports the seven things `main.py` needs. |
 | `sources/__init__.py` | The list of five `SourceSpec`s. Adding a sixth is one line here plus one new module. |
-| `sources/cve.py` | 7 files → 1,093,334 dots, 1,069,414 arrow rows. **96% of the graph.** Five entity files, four of which are severity rather than vulnerabilities. |
+| `sources/cve.py` | 7 files → 940,892 dots, 916,972 arrow rows. **95% of the graph.** Five entity files, four of which are severity rather than vulnerabilities. |
 | `sources/cwe.py` | 10 files → 5,056 dots, 18,339 rows. Eight entity files because preprocessing pulled sub-records (platforms, mitigations, detection methods, consequences, introduction phases) out into shared dots, with the per-weakness commentary moved onto the arrows. |
 | `sources/capec.py` | 6 files → 1,538 dots, 4,930 rows. Two edge files that load identically — the split is a fact about preprocessing, not about the graph. |
 | `sources/mitre_attack.py` | 17 files → 6,052 dots, 36,346 rows. The widest variety of dot kinds: techniques, malware, tools, threat groups, campaigns, mitigations, tactics, matrices, analytics, detection strategies, data components, data sources, ICS assets, log sources. |
@@ -436,7 +447,7 @@ deterministic uuid5 that makes a reload *update* it rather than add a second one
 Every dot gets a property naming which encyclopedia it came from. It is
 deliberately **not** called `source` — because CVSS and SSVC cards *already* have
 a `source` field holding the assessing organisation (`nvd@nist.gov`, or a CNA
-uuid). Taking that name would silently overwrite real data on **746,387 dots**.
+uuid). Taking that name would silently overwrite real data on **593,945 dots**.
 `stages/nodes.py` refuses to load if a card already has a field by this name.
 
 Arrows use `asserted_by` instead, and it's a **list**, because an arrow can

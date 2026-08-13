@@ -111,7 +111,7 @@ class GroupedWriter:
 
     Edges have to be grouped before writing, because that triple is what fixes
     the Cypher statement. Collecting all of them first is not an option:
-    `CVE/relationships.json` alone is 746,387 rows, and holding them as Python
+    `CVE/relationships.json` alone is 593,945 rows, and holding them as Python
     dicts would cost more memory than the entire Neo4j heap this runs beside.
 
     So groups flush as soon as one fills a batch, and if the total buffered

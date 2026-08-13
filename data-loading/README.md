@@ -211,23 +211,34 @@ deterministic uuid5 that makes a reload update it rather than add a second one.
 Every node gets a `catalog` property naming its source. It's deliberately **not**
 called `source`: CVSS and SSVC records already have a `source` field holding the
 assessing organisation (`nvd@nist.gov`, or a CNA uuid), and taking that name would
-silently overwrite it on 746,387 nodes. `stages/nodes.py` refuses to load if a
+silently overwrite it on 593,945 nodes. `stages/nodes.py` refuses to load if a
 record already has a field by that name.
 
-### CVSS: both summarised and kept
+### CVSS: reduced, summarised, and kept
 
-Severity is 746,387 score/assessment nodes -- more than half the graph -- and
-nothing in the trace path traverses them. They're loaded in full, *and* each
-`:Vulnerability` gets flat `cvss_base_score` / `cvss_base_severity` /
+Severity is 593,945 score/assessment nodes -- the largest single thing in the
+graph -- and nothing in the trace path traverses them. They're loaded in full,
+*and* each `:Vulnerability` gets flat `cvss_base_score` / `cvss_base_severity` /
 `cvss_vector_string` / `cvss_version` properties, so "the critical CVEs with a
 full trace to a defence" costs no extra hop.
 
 That runs as a post-load Cypher pass (`catalog/enrichments.py`) rather than in
 Python, because the score files don't record which CVE they belong to -- that's in
 `relationships.json` -- so rebuilding the join in memory would mean holding two
-~700,000-entry maps. After loading it's a traversal the indexes already serve.
+very large maps. After loading it's a traversal the indexes already serve.
 Preference order: v3.1 -> v3.0 -> v4.0 -> v2.0, NVD's `Primary` assessment before
-any CNA `Secondary`. v4.0 sits below v3 on purpose: only 29,426 CVEs have one.
+any CNA `Secondary`. v4.0 sits below v3 on purpose: only 29,425 CVEs have one.
+
+`cvss_base_severity` is **computed** by that pass, not copied: it is a fixed band
+table over `base_score`, so `data-preprocessing/` stopped storing it.
+
+That 593,945 was 746,387 until `data-preprocessing/` began applying three
+reductions -- dropping CVSS fields that `vectorString` already encodes, dropping
+v2 scores on a CVE that also has a v3 one, and dropping Secondary scores that
+assert exactly what a Primary asserts. Nothing was lost that can't be recomputed:
+the enum metrics are read back out of `vector_string`, and a surviving `Secondary`
+row now means the CNA genuinely disagreed with NVD. Full rationale and the
+verification behind it are in `data-preprocessing/CVE/cve_preprocessing.py`.
 
 ## Validation is a hard gate
 

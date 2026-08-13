@@ -10,6 +10,28 @@ files (`cvss_v2_scores.json`, `cvss_v3_scores.json`, `cvss_v4_scores.json`,
 `ssvc_assessments.json`), each linked back to its owning CVE by an edge in
 `relationships.json`. See `README.md` for the rationale.
 
+**Three reductions apply to the score files**, cutting them from 746,387
+records to 593,945 and from 476 MB to 192 MB. Every CVSS record now carries
+only `id`, `type`, `source`, `assessment_type`, `version`, `vector_string`
+and `base_score` (plus, on v2, five NVD booleans with no vector
+representation):
+
+1. **Derived fields are dropped.** Every enum metric is already spelled out
+   in `vector_string`; `baseSeverity` is a band table over `baseScore`; the
+   two subscores are the published CVSS formulas over the vector. Verified
+   reconstructible with **0 mismatches across all 583,026 score records**
+   before removal.
+2. **A v2 score is dropped when the same CVE also has a v3 score** (122,022
+   records). v2 is kept wherever it is the only assessment — 72,414 CVEs.
+3. **A Secondary score that asserts exactly what a Primary asserts is
+   dropped** (30,420 records). A Secondary that *differs* is genuine scoring
+   disagreement and is kept.
+
+Rules 2 and 3 only ever drop a record that has a surviving sibling on the
+same CVE, so no CVE loses its severity data. Reconstructing a dropped enum
+field means parsing `vector_string`; the mapping is the CVSS specification's
+own abbreviation table.
+
 ## `vulnerabilities.json` (346,947 records)
 
 One record per CVE.
@@ -37,67 +59,71 @@ One record per CVE.
 | `Received` | 335 (0.1%) | Just ingested from a CNA. |
 | `Undergoing Analysis` | 254 (0.1%) | NVD analysis is actively in progress. |
 
-## `cvss_v2_scores.json` (194,545 records)
+## `cvss_v2_scores.json` (72,472 records)
 
-One record per `cvssMetricV2[]` entry across all CVEs (a CVE with both a
-Primary and Secondary v2 score contributes two records). Linked to its CVE
-by a `has_cvss_v2_score` edge in `relationships.json`.
+One record per surviving `cvssMetricV2[]` entry. Down from 194,545: 122,022
+were dropped for sitting on a CVE that also carries a v3 score, and 51 for
+echoing a Primary. What remains is almost entirely NVD scoring a CVE that
+never received a v3 assessment — hence `assessment_type` being 99.9%
+`Primary` and `source` collapsing from 8 distinct orgs to 2. Linked to its
+CVE by a `has_cvss_v2_score` edge in `relationships.json`.
 
 | Field | Type | Present | Description |
 |---|---|---|---|
-| `id` | string | 100% | `cvss-v2-score--<uuid5>`, deterministic — seeded from the owning CVE id, entry position, and this record's own flattened content. |
+| `id` | string | 100% | `cvss-v2-score--<uuid5>`, deterministic — seeded from the owning CVE id, entry position in the *raw* input, and this record's own flattened content. |
 | `type` | string | 100% | Constant: `"cvss-v2-score"`. |
-| `source` | string | 100% | Org id that produced this score. 8 distinct values — `nvd@nist.gov` (180,076), `cna@vuldb.com` (14,299), `ics-cert@hq.dhs.gov` (119), `disclosures@exodusintel.com` (36), plus a handful of others. |
-| `assessment_type` | string (enum) | 100% | `Primary` (180,076) — NVD's own authoritative score — or `Secondary` (14,469) — a CNA-supplied score NVD is also recording alongside its own. (Renamed from the source's own `type` field to avoid colliding with this record's `type: "cvss-v2-score"` discriminator.) |
-| `baseSeverity` | string (enum) | 100% | `MEDIUM` (112,557), `HIGH` (61,490), `LOW` (20,498). CVSS v2 has no official severity-band standard — this is NVD's own qualitative bucketing of `baseScore`. |
-| `exploitabilityScore` | float | 100% | 0–10. |
-| `impactScore` | float | 100% | 0–10. |
-| `acInsufInfo` | bool | 100% | "Access Complexity — insufficient information" flag. |
-| `obtainAllPrivilege` | bool | 100% | Whether successful exploitation grants the attacker all privileges. |
-| `obtainOtherPrivilege` | bool | 100% | Whether it grants privileges belonging to a different user/context. |
-| `obtainUserPrivilege` | bool | 100% | Whether it grants regular user-level privileges. |
-| `userInteractionRequired` | bool | 99.5% | Whether a victim must take some action for exploitation to succeed. The only optional field in this shape — missing on 973 records. |
+| `source` | string | 100% | Org id that produced this score. 2 distinct values — `nvd@nist.gov` (72,414), `ics-cert@hq.dhs.gov` (58). |
+| `assessment_type` | string (enum) | 100% | `Primary` (72,414) — NVD's own authoritative score — or `Secondary` (58) — a CNA-supplied score that disagrees with NVD's. (Renamed from the source's own `type` field to avoid colliding with this record's `type: "cvss-v2-score"` discriminator.) |
 | `version` | string | 100% | Constant `"2.0"`. |
-| `vectorString` | string | 100% | Raw CVSS v2 vector string, e.g. `"AV:N/AC:L/Au:N/C:N/I:N/A:P"`. |
-| `accessVector` | string (enum) | 100% | `NETWORK` (162,434), `LOCAL` (27,113), `ADJACENT_NETWORK` (4,998). |
-| `accessComplexity` | string (enum) | 100% | `LOW` (118,925), `MEDIUM` (69,791), `HIGH` (5,829). |
-| `authentication` | string (enum) | 100% | `NONE` (156,509), `SINGLE` (36,666), `MULTIPLE` (1,370). |
-| `confidentialityImpact` | string (enum) | 100% | `PARTIAL` (98,029), `NONE` (62,964), `COMPLETE` (33,552). |
-| `integrityImpact` | string (enum) | 100% | `PARTIAL` (106,412), `NONE` (55,557), `COMPLETE` (32,576). |
-| `availabilityImpact` | string (enum) | 100% | `PARTIAL` (86,374), `NONE` (69,264), `COMPLETE` (38,907). |
+| `vectorString` | string | 100% | Raw CVSS v2 vector string, e.g. `"AV:N/AC:L/Au:N/C:N/I:N/A:P"`. Encodes `accessVector`, `accessComplexity`, `authentication` and the three impact metrics, none of which is stored separately any more. |
 | `baseScore` | float | 100% | 0.0–10.0. |
+| `acInsufInfo` | bool | 100% | "Access Complexity — insufficient information" flag. `False` (70,462), `True` (2,010). |
+| `obtainAllPrivilege` | bool | 100% | Whether successful exploitation grants the attacker all privileges. `False` (67,497), `True` (4,975). |
+| `obtainOtherPrivilege` | bool | 100% | Whether it grants privileges belonging to a different user/context. `False` (63,186), `True` (9,286). |
+| `obtainUserPrivilege` | bool | 100% | Whether it grants regular user-level privileges. `False` (70,099), `True` (2,373). |
+| `userInteractionRequired` | bool | 99.8% | Whether a victim must take some action for exploitation to succeed. The only optional field in this shape — missing on 137 records. |
 
-## `cvss_v3_scores.json` (359,055 records)
+Those five booleans are the only v2 fields kept beyond the common set: they
+are NVD additions with no representation in the vector string, so unlike the
+enum metrics they cannot be recomputed.
 
-One record per `cvssMetricV30[]`/`cvssMetricV31[]` entry, combined into a
-single file since the two versions share an identical shape — `version`
-disambiguates. Linked to its CVE by a `has_cvss_v3_score` edge.
+**Dropped as derived:** `baseSeverity` (a band table over `baseScore` — NVD's
+own three-band bucketing, CVSS v2 having no official one),
+`exploitabilityScore` and `impactScore` (the published v2 formulas over the
+vector), and `accessVector` / `accessComplexity` / `authentication` /
+`confidentialityImpact` / `integrityImpact` / `availabilityImpact` (all
+spelled out in `vectorString`).
+
+## `cvss_v3_scores.json` (328,687 records)
+
+One record per surviving `cvssMetricV30[]`/`cvssMetricV31[]` entry, combined
+into a single file since the two versions share an identical shape —
+`version` disambiguates. Down from 359,055: 30,368 Secondary scores were
+dropped for asserting exactly what a Primary on the same CVE already
+asserted. Linked to its CVE by a `has_cvss_v3_score` edge.
 
 | Field | Type | Present | Description |
 |---|---|---|---|
 | `id` | string | 100% | `cvss-v3-score--<uuid5>`, deterministic. |
 | `type` | string | 100% | Constant: `"cvss-v3-score"`. |
-| `source` | string | 100% | Org id that produced this score. |
-| `assessment_type` | string (enum) | 100% | `Primary` (191,262) / `Secondary` (167,793). |
-| `version` | string (enum) | 100% | `3.1` (302,716) / `3.0` (56,339). |
-| `exploitabilityScore` | float | 100% | 0–10. |
-| `impactScore` | float | 100% | 0–10. |
-| `vectorString` | string | 100% | Raw CVSS v3.x vector string. |
-| `attackVector` | string (enum) | 100% | `NETWORK` (262,072), `LOCAL` (83,687), `ADJACENT_NETWORK` (10,006), `PHYSICAL` (3,290). |
-| `attackComplexity` | string (enum) | 100% | `LOW` (328,419), `HIGH` (30,636). |
-| `privilegesRequired` | string (enum) | 100% | `NONE` (198,136), `LOW` (127,567), `HIGH` (33,352). |
-| `userInteraction` | string (enum) | 100% | `NONE` (244,477), `REQUIRED` (114,578). |
-| `scope` | string (enum) | 100% | `UNCHANGED` (285,527), `CHANGED` (73,528) — whether impact extends beyond the vulnerable component's own security authority. |
-| `confidentialityImpact` | string (enum) | 100% | `HIGH` (184,818), `LOW` (90,815), `NONE` (83,422). |
-| `integrityImpact` | string (enum) | 100% | `HIGH` (156,755), `NONE` (108,131), `LOW` (94,169). |
-| `availabilityImpact` | string (enum) | 100% | `HIGH` (184,120), `NONE` (139,172), `LOW` (35,763). |
+| `source` | string | 100% | Org id that produced this score. 354 distinct values — `nvd@nist.gov` (193,553), `134c704f-9b21-4f2e-91b3-4a467353bcc0` (21,353), `audit@patchstack.com` (16,469), `cna@vuldb.com` (14,638), then a long tail. |
+| `assessment_type` | string (enum) | 100% | `Primary` (191,262) / `Secondary` (137,425). Every surviving Secondary differs from its CVE's Primary in at least one of `version`/`vectorString`/`baseScore`, or has no Primary to differ from — the ones that agreed were dropped. |
+| `version` | string (enum) | 100% | `3.1` (273,046) / `3.0` (55,641). |
+| `vectorString` | string | 100% | Raw CVSS v3.x vector string, e.g. `"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"`. Encodes all eight base metrics, none of which is stored separately any more. |
 | `baseScore` | float | 100% | 0.0–10.0. |
-| `baseSeverity` | string (enum) | 100% | `MEDIUM` (160,395), `HIGH` (140,204), `CRITICAL` (46,600), `LOW` (11,812), `NONE` (44). |
 
-## `cvss_v4_scores.json` (29,426 records)
+**Dropped as derived:** `baseSeverity` (the official CVSS band table over
+`baseScore`), `exploitabilityScore` and `impactScore` (the published v3
+formulas over the vector), and `attackVector` / `attackComplexity` /
+`privilegesRequired` / `userInteraction` / `scope` /
+`confidentialityImpact` / `integrityImpact` / `availabilityImpact` (all
+spelled out in `vectorString`).
 
-One record per `cvssMetricV40[]` entry. The 14 environmental-override
-fields (`confidentialityRequirement`, `integrityRequirement`,
+## `cvss_v4_scores.json` (29,425 records)
+
+One record per surviving `cvssMetricV40[]` entry (exactly one was dropped for
+echoing a Primary). The 14 environmental-override fields
+(`confidentialityRequirement`, `integrityRequirement`,
 `availabilityRequirement`, `modifiedAttackVector`,
 `modifiedAttackComplexity`, `modifiedAttackRequirements`,
 `modifiedPrivilegesRequired`, `modifiedUserInteraction`,
@@ -111,30 +137,25 @@ customizes them. Linked to its CVE by a `has_cvss_v4_score` edge.
 |---|---|---|---|
 | `id` | string | 100% | `cvss-v4-score--<uuid5>`, deterministic. |
 | `type` | string | 100% | Constant: `"cvss-v4-score"`. |
-| `source` | string | 100% | Org id — dominated by CNAs (`cna@vuldb.com`, `disclosure@vulncheck.com`, `security-advisories@github.com`, …) rather than NVD itself. |
-| `assessment_type` | string (enum) | 100% | `Secondary` (29,421) / `Primary` (5) — almost all v4.0 scores in this dataset came from CNAs, not NVD. |
+| `source` | string | 100% | Org id — 281 distinct, dominated by CNAs (`cna@vuldb.com` 11,232, `disclosure@vulncheck.com` 4,489, `security-advisories@github.com` 4,040, `ics-cert@hq.dhs.gov` 680, …) rather than NVD itself. |
+| `assessment_type` | string (enum) | 100% | `Secondary` (29,420) / `Primary` (5) — almost all v4.0 scores in this dataset came from CNAs, not NVD. |
 | `version` | string | 100% | Constant `"4.0"`. |
-| `vectorString` | string | 100% | Raw CVSS v4.0 vector string. |
+| `vectorString` | string | 100% | Raw CVSS v4.0 vector string. Encodes all eleven base metrics *and* the supplemental ones: v4.0 omits a supplemental metric from the vector exactly when it is `NOT_DEFINED`, which 97%+ of them are. |
 | `baseScore` | float | 100% | 0.0–10.0. |
-| `baseSeverity` | string (enum) | 100% | `MEDIUM` (12,933), `HIGH` (9,046), `LOW` (4,956), `CRITICAL` (2,434), `NONE` (57). |
-| `attackVector` | string (enum) | 100% | `NETWORK` (23,730), `LOCAL` (4,327), `ADJACENT` (1,120), `PHYSICAL` (249) — note the value is `ADJACENT`, not v3's `ADJACENT_NETWORK`. |
-| `attackComplexity` | string (enum) | 100% | `LOW` (27,035), `HIGH` (2,391). |
-| `attackRequirements` | string (enum) | 100% | `NONE` (25,924), `PRESENT` (3,502) — new in v4: whether exploitation depends on specific deployment/execution conditions. |
-| `privilegesRequired` | string (enum) | 100% | `NONE` (14,327), `LOW` (12,157), `HIGH` (2,942). |
-| `userInteraction` | string (enum) | 100% | `NONE` (23,208), `PASSIVE` (3,972), `ACTIVE` (2,246) — v4 splits v3's binary UI into passive/active involvement. |
-| `vulnConfidentialityImpact` | string (enum) | 100% | `HIGH` (10,660), `LOW` (10,373), `NONE` (8,393) — impact on the vulnerable system itself. |
-| `vulnIntegrityImpact` | string (enum) | 100% | `LOW` (11,943), `HIGH` (9,256), `NONE` (8,227). |
-| `vulnAvailabilityImpact` | string (enum) | 100% | `NONE` (10,929), `HIGH` (9,300), `LOW` (9,197). |
-| `subConfidentialityImpact` | string (enum) | 100% | `NONE` (24,767), `LOW` (2,471), `HIGH` (2,188) — impact on *other* ("subsequent") systems, v4's replacement for v3's `scope`. |
-| `subIntegrityImpact` | string (enum) | 100% | `NONE` (25,009), `LOW` (2,438), `HIGH` (1,979). |
-| `subAvailabilityImpact` | string (enum) | 100% | `NONE` (26,706), `HIGH` (1,731), `LOW` (989). |
-| `exploitMaturity` | string (enum) | 100% | `NOT_DEFINED` (21,208), `PROOF_OF_CONCEPT` (7,518), `UNREPORTED` (665), `ATTACKED` (35) — real-world exploit evidence. |
-| `Safety` | string (enum) | 100% | `NOT_DEFINED` (29,064), `NEGLIGIBLE` (243), `PRESENT` (119) — vendor-supplied context, mostly unset. |
-| `Automatable` | string (enum) | 100% | `NOT_DEFINED` (28,575), `YES` (516), `NO` (335). |
-| `Recovery` | string (enum) | 100% | `NOT_DEFINED` (28,681), `USER` (505), `AUTOMATIC` (208), `IRRECOVERABLE` (32). |
-| `valueDensity` | string (enum) | 100% | `NOT_DEFINED` (28,820), `DIFFUSE` (310), `CONCENTRATED` (296). |
-| `vulnerabilityResponseEffort` | string (enum) | 100% | `NOT_DEFINED` (28,632), `MODERATE` (498), `LOW` (242), `HIGH` (54). |
-| `providerUrgency` | string (enum) | 100% | `NOT_DEFINED` (28,595), `AMBER` (396), `GREEN` (182), `RED` (173), `CLEAR` (80). |
+
+**Dropped as derived:** `baseSeverity` (the official CVSS band table over
+`baseScore`); the base metrics `attackVector`, `attackComplexity`,
+`attackRequirements`, `privilegesRequired`, `userInteraction`,
+`vulnConfidentialityImpact` / `vulnIntegrityImpact` /
+`vulnAvailabilityImpact`, `subConfidentialityImpact` /
+`subIntegrityImpact` / `subAvailabilityImpact`; and the supplemental metrics
+`exploitMaturity`, `Safety`, `Automatable`, `Recovery`, `valueDensity`,
+`vulnerabilityResponseEffort`, `providerUrgency`. All of them are read back
+out of `vectorString`, an absent supplemental metric meaning `NOT_DEFINED`.
+
+Worth knowing when reading v4 vectors back: `attackVector` uses `ADJACENT`,
+not v3's `ADJACENT_NETWORK`; `userInteraction` splits v3's binary into
+`PASSIVE`/`ACTIVE`; and the `sub*` metrics replace v3's `scope`.
 
 ## `ssvc_assessments.json` (163,361 records)
 
@@ -157,18 +178,20 @@ this record. Linked to its CVE by a `has_ssvc_assessment` edge.
 | `automatable` | string (enum) | 100% | `no` (126,130), `yes` (37,231) — whether the exploit steps can be automated at scale. |
 | `technicalImpact` | string (enum) | 100% | `partial` (108,195), `total` (55,166) — degree of control/damage gained on successful exploitation. |
 
-## `relationships.json` (746,387 records)
+## `relationships.json` (593,945 records)
 
 Internal edges from a `Vulnerability` to one of its scoring entities. `id`,
 `type`, `relationship_type`, `source_ref` (`CVE-N`), `target_ref` (the
-score/assessment record's own `id`).
+score/assessment record's own `id`). One edge per surviving score record and
+no others — a record dropped by any of the three reductions takes its edge
+with it, so this file's total is exactly the sum of the four entity files.
 
 | `relationship_type` | Count | Edge |
 |---|---|---|
-| `has_cvss_v3_score` | 359,055 | CVE → `cvss_v3_scores.json` record |
-| `has_cvss_v2_score` | 194,545 | CVE → `cvss_v2_scores.json` record |
+| `has_cvss_v3_score` | 328,687 | CVE → `cvss_v3_scores.json` record |
 | `has_ssvc_assessment` | 163,361 | CVE → `ssvc_assessments.json` record |
-| `has_cvss_v4_score` | 29,426 | CVE → `cvss_v4_scores.json` record |
+| `has_cvss_v2_score` | 72,472 | CVE → `cvss_v2_scores.json` record |
+| `has_cvss_v4_score` | 29,425 | CVE → `cvss_v4_scores.json` record |
 
 ## `external_relationships.json` (323,027 records)
 
@@ -179,6 +202,9 @@ type, relationship_type, source_ref, target_ref, source_name.
 
 For reference — see `README.md` for the full rationale:
 
+- CVSS derived fields — every enum metric (readable from `vectorString`), `baseSeverity` (a band table over `baseScore`), and v2/v3's `exploitabilityScore`/`impactScore` (published formulas over the vector). Verified reconstructible with 0 mismatches across all 583,026 score records.
+- CVSS v2 scores on a CVE that also has a v3 score — 122,022 records.
+- Secondary scores asserting exactly what a Primary on the same CVE asserts — 30,420 records.
 - `external_references` — dropped entirely (redundant self-reference plus non-entity bibliography URLs).
 - `x_nvd_configurations` (CPE applicability data) — dropped entirely (nested AND/OR boolean tree, no lossless flat edge to extract).
 - `name` — dropped from `vulnerabilities.json`; its value now lives in `id` instead.

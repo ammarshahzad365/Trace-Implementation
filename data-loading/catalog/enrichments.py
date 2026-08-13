@@ -1,21 +1,25 @@
 """Copying each CVE's headline severity onto the CVE node itself.
 
-Half the graph is severity data: 746,387 score and assessment nodes hanging off
-346,947 vulnerabilities. Nothing in the CVE -> CWE -> CAPEC -> ATT&CK -> D3FEND
-trace goes through them, but "show me the critical CVEs that have a full trace to
-a defence" is exactly the kind of question this project will ask constantly, and
-answering it shouldn't cost a hop and a filter on every query.
+Severity is the largest thing in the graph: 593,945 score and assessment nodes
+hanging off 346,947 vulnerabilities. Nothing in the CVE -> CWE -> CAPEC -> ATT&CK
+-> D3FEND trace goes through them, but "show me the critical CVEs that have a full
+trace to a defence" is exactly the kind of question this project will ask
+constantly, and answering it shouldn't cost a hop and a filter on every query.
 
 So each `:Vulnerability` gets four flat properties -- `cvss_base_score`,
-`cvss_base_severity`, `cvss_vector_string`, `cvss_version` -- while the full score
-nodes stay in place for anything needing the detail (competing CNA assessments,
-sub-scores, v2/v4 specifics).
+`cvss_base_severity`, `cvss_vector_string`, `cvss_version` -- while the score nodes
+stay in place for anything needing the detail (competing CNA assessments, the full
+metric breakdown in `vector_string`, v2/v4 specifics).
+
+`cvss_base_severity` is computed here rather than copied: `data-preprocessing/`
+drops `baseSeverity` from the score records because it is a fixed band table over
+`baseScore` and storing both was storing one fact twice. See `_BAND_CVSS3`.
 
 ## Why this runs after loading rather than during it
 
 The score files don't record which CVE they belong to; that lives in
 `CVE/relationships.json`. Rebuilding that join in Python would mean holding a
-746,387-entry map alongside a 583,000-entry one, in a process already streaming a
+593,945-entry map alongside a 430,584-entry one, in a process already streaming a
 gigabyte of JSON next to a 1.5 GB Neo4j heap. After loading, it's a two-hop
 traversal the constraints already indexed.
 
@@ -26,6 +30,13 @@ standard first, oldest last. v4.0 sits below v3 deliberately: only 29,426 CVEs
 have one, so preferring it would leave the property inconsistently sourced across
 the corpus for no gain. Within each version, NVD's own `Primary` assessment wins;
 a `Secondary` (CNA-supplied) score is used only when there's no Primary at all.
+
+The two v2 passes now only ever fire for a CVE with no v3 score at all:
+`data-preprocessing/` drops a v2 score outright when the same CVE also carries a
+v3 one, on the grounds that this preference order meant nothing ever read it. The
+one behavioural change is a CVE holding a v2 Primary *and* a v3 Secondary -- the
+v2 Primary used to win on pass 4, and now the v3 Secondary wins on pass 5. That is
+the newer standard winning, which is the order's intent.
 
 Each pass is guarded by `cvss_base_score IS NULL`, so an earlier pass always wins
 and the eight passes compose into a single preference order. That guard also makes
@@ -41,22 +52,41 @@ from __future__ import annotations
 
 from graphload.enrichment import EnrichmentStep
 
-_ASSIGN = """
-      SET v.cvss_base_score = s.base_score,
-          v.cvss_base_severity = s.base_severity,
-          v.cvss_vector_string = s.vector_string,
-          v.cvss_version = s.version
-"""
+# The severity band is a pure function of the base score, so `data-preprocessing/`
+# stops storing it on the 430,584 score records and it is recomputed here instead --
+# the one place in the graph that still wants it as a plain string to filter on.
+#
+# v3 and v4 share the official CVSS band table; v2 predates it and uses NVD's own
+# three-band bucketing, which has no NONE and no CRITICAL.
+_BAND_CVSS3 = """CASE
+            WHEN s.base_score = 0.0 THEN 'NONE'
+            WHEN s.base_score < 4.0 THEN 'LOW'
+            WHEN s.base_score < 7.0 THEN 'MEDIUM'
+            WHEN s.base_score < 9.0 THEN 'HIGH'
+            ELSE 'CRITICAL'
+          END"""
+
+_BAND_CVSS2 = """CASE
+            WHEN s.base_score < 4.0 THEN 'LOW'
+            WHEN s.base_score < 7.0 THEN 'MEDIUM'
+            ELSE 'HIGH'
+          END"""
 
 
 def _pass(label: str, rel: str, assessment: str, version: str | None) -> str:
     version_clause = f"AND s.version = '{version}' " if version else ""
+    band = _BAND_CVSS2 if label == "CvssV2Score" else _BAND_CVSS3
     return f"""
 MATCH (v:Vulnerability)-[:{rel}]->(s:{label})
 WHERE v.cvss_base_score IS NULL
   AND s.assessment_type = '{assessment}'
   {version_clause}AND s.base_score IS NOT NULL
-CALL (v, s) {{ {_ASSIGN} }} IN TRANSACTIONS OF 10000 ROWS
+CALL (v, s) {{
+      SET v.cvss_base_score = s.base_score,
+          v.cvss_base_severity = {band},
+          v.cvss_vector_string = s.vector_string,
+          v.cvss_version = s.version
+}} IN TRANSACTIONS OF 10000 ROWS
 """
 
 

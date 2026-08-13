@@ -79,11 +79,13 @@ ORDER BY score DESC, cve LIMIT 25;
 
 // The full detail behind one CVE's score, including competing CNA assessments.
 // (The summary properties are only the headline one -- this is what they came from.)
+// `vector_string` carries every individual metric: preprocessing drops the spelled-out
+// enum fields because the vector already states them. A Secondary row appearing here
+// means the CNA disagreed with NVD -- one that merely echoed it was never loaded.
 MATCH (v:Vulnerability {id: "CVE-2021-44228"})-[r]->(s)
 WHERE s:CvssV2Score OR s:CvssV3Score OR s:CvssV4Score OR s:SsvcAssessment
 RETURN type(r) AS kind, s.assessment_type AS who, s.source AS assessor,
-       s.version AS version, s.base_score AS score, s.base_severity AS severity,
-       s.vector_string AS vector;
+       s.version AS version, s.base_score AS score, s.vector_string AS vector;
 
 
 // ===========================================================================
