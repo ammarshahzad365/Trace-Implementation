@@ -49,88 +49,72 @@ reverse direction of CWE's own `CWE-N --related-to--> CVE-N` edges (from
 `NVD-CWE-Other`) aren't real catalog entries and are dropped, not extracted
 or kept as an attribute.
 
-## `x_nvd_cvss` is fully unnested into its own entity files
+## `x_nvd_cvss` is folded onto the vulnerability, not made into nodes
 
 `x_nvd_cvss` is a container keyed by up to five metric-version names
 (`cvssMetricV2`, `cvssMetricV30`, `cvssMetricV31`, `cvssMetricV40`,
 `ssvcV203`), each a *list* of scored assessments, each of which nests its
-own `cvssData`/`ssvcData` object one level deeper. None of that survives in
-`vulnerabilities.json` -- the whole field is removed from the vulnerability
-record and rebuilt as flat entities plus `has_cvss_v2_score` /
-`has_cvss_v3_score` / `has_cvss_v4_score` / `has_ssvc_assessment` edges in
-`relationships.json`:
+own `cvssData`/`ssvcData` object one level deeper.
 
-- `cvssMetricV2` -> `cvss_v2_scores.json`. Each entry's own fields and its
-  nested `cvssData` fields are merged into one flat record -- no collision,
-  since v2's `baseSeverity` is the entry's own sibling field while
-  `cvssData` never repeats it. What survives the derived-field pass below:
-  `source`, `assessment_type`, `version`, `vectorString`, `baseScore`, and
-  the five NVD booleans that have no vector representation (`acInsufInfo`,
-  `obtainAllPrivilege`, `obtainOtherPrivilege`, `obtainUserPrivilege`,
-  `userInteractionRequired`). The entry's own `type`
-  (`Primary`/`Secondary`) is renamed `assessment_type` to avoid colliding
-  with the record's own `type: "cvss-v2-score"` discriminator.
-- `cvssMetricV30` / `cvssMetricV31` -> `cvss_v3_scores.json`, combined into
-  one file: the two versions have an identical shape and only ever differ in
-  `version`'s own value (`"3.0"` vs `"3.1"`), which stays on the flattened
-  record to disambiguate. Surviving fields: `source`, `assessment_type`,
-  `version`, `vectorString`, `baseScore`.
-- `cvssMetricV40` -> `cvss_v4_scores.json`. Surviving fields: `source`,
-  `assessment_type`, `version`, `vectorString`, `baseScore`. The 14
-  environmental-override fields (`confidentialityRequirement`/
-  `integrityRequirement`/`availabilityRequirement`,
-  `modifiedAttackVector`/`modifiedAttackComplexity`/
-  `modifiedAttackRequirements`/`modifiedPrivilegesRequired`/
-  `modifiedUserInteraction`, `modifiedVulnConfidentialityImpact`/
-  `modifiedVulnIntegrityImpact`/`modifiedVulnAvailabilityImpact`,
-  `modifiedSubConfidentialityImpact`/`modifiedSubIntegrityImpact`/
-  `modifiedSubAvailabilityImpact`) are dropped entirely -- verified
-  `NOT_DEFINED` on all 29,426 v4.0 entries in this dataset, pure boilerplate
-  NVD never customizes, the same treatment this project already gives other
-  always-constant fields (e.g. mitre-attack's always-false
-  `revoked`/`x_mitre_deprecated` on relationship records).
-- `ssvcV203` -> `ssvc_assessments.json`. `source` plus `ssvcData`'s `role`,
-  `version`, `timestamp` are kept flat; `ssvcData.id` (a redundant echo of
-  the CVE's own id) is dropped; `ssvcData.options` -- a list of single-key
-  objects, one per decision point (`exploitation`, `automatable`,
-  `technicalImpact`) -- has each key merged directly onto the flat record
-  instead of kept as a nested list.
+An earlier pass unnested all five into their own entity files plus
+`has_cvss_v*_score` / `has_ssvc_assessment` edges. That cost one node and one
+edge per assessment -- 593,945 of each against 346,947 vulnerabilities, so
+severity was roughly two thirds of the loaded graph -- to model something the
+CVE -> CWE -> CAPEC -> ATT&CK -> D3FEND trace never traverses and that every
+query only ever reads as a filter or a sort key (`WHERE v.cvss_base_score >=
+9.0`). Deduplicating those nodes could not fix it: 82.7% of scored CVEs carry
+exactly one assessment, so the count is driven by there being a node class at
+all, not by redundancy within it.
 
-## Three reductions on the score records
+So the whole container is now flattened onto the vulnerability record itself
+as plain properties. Every field keeps a `cvss_` or `ssvc_` prefix naming the
+scoring system it came from, so which properties belong to which system stays
+readable on a record that also carries the CVE's own fields:
 
-Severity was two-thirds of the loaded graph -- 746,387 score/assessment nodes
-against 346,947 vulnerabilities, none of which the CVE -> CWE -> CAPEC ->
-ATT&CK -> D3FEND trace ever traverses. Three rules cut that down without
-losing anything that can't be recomputed:
+    cvss_version, cvss_base_score, cvss_vector_string, cvss_source,
+    cvss_assessment_type, cvss_assessment_count
+    cvss_base_score_min, cvss_base_score_max        (only when disputed)
+    cvss_ac_insuf_info, cvss_obtain_all_privilege,  (only when v2 wins)
+    cvss_obtain_other_privilege, cvss_obtain_user_privilege,
+    cvss_user_interaction_required
+    ssvc_exploitation, ssvc_automatable, ssvc_technical_impact
 
-1. **Derived fields are dropped** (`CVSS_V*_DERIVED_FIELDS`). Every enum
-   metric is already spelled out in `vectorString`, `baseSeverity` is a band
-   table over `baseScore`, and the two subscores are the published formulas
-   over the vector. Verified reconstructible with 0 mismatches across all
-   583,026 score records before removal. Node count unchanged; roughly a
-   third of the property store.
-2. **v2 scores are dropped where a v3 score exists on the same CVE**
-   (`drop_superseded_v2`). v2 has been deprecated since 2019 and the loader's
-   enrichment pass already ranks it below every v3, so those records were
-   never the ones anything read. v2 is kept wherever it is the only
-   assessment, which is 72,414 CVEs.
-3. **Secondary scores that echo a Primary are dropped**
-   (`drop_echoed_secondaries`). A CNA score asserting exactly what NVD's own
-   Primary asserts spends a node and an edge recording agreement. One that
-   *differs* is real scoring disagreement and is kept.
+`cvss_*` and `ssvc_*` are both absent entirely on a CVE that was never scored
+by that system, rather than present-and-null.
 
-Rules 2 and 3 only ever remove a record that has a surviving sibling on the
-same CVE, so no CVE loses its severity data outright.
+### Which assessment wins
 
-Every score/assessment record gets a deterministic id
-(`<entity-type>--<uuid5>`), seeded from the owning CVE id, the raw metric
-key, the entry's position, and the entry's own flattened content -- reruns
-against the same input produce byte-identical output, and a CVE with
-multiple assessments of the same metric version (up to 4, e.g. NVD's
-Primary alongside several CNA Secondary scores) still gets one distinct
-record per assessment. The position in that seed is the entry's position in
-the *raw* input list, so dropping a record under rules 2 and 3 never re-ids
-the ones that survive alongside it.
+A CVE can carry up to four assessments of the same metric version (NVD's own
+`Primary` alongside several CNA `Secondary` scores) across up to four metric
+versions. `select_cvss` ranks them by `CVSS_VERSION_PRECEDENCE` (4.0 > 3.1 >
+3.0 > 2.0 -- the newer standard wins, and v2 has been deprecated since 2019),
+then `Primary` over `Secondary`, then higher `base_score`, then earliest
+position in the raw input. That ordering is total and reads only the record's
+own fields, so reruns against the same input produce byte-identical output.
+
+### Disagreement is summarised, not discarded
+
+Picking one winner would otherwise silently drop the fact that NVD and a CNA
+disagree, which is true of a sixth of scored CVEs. `cvss_assessment_count`
+counts the *distinct* claims -- `(version, vector_string, base_score)` triples
+-- made about this CVE, so a `Secondary` that merely echoes a `Primary`
+counts once rather than twice, and `cvss_base_score_min`/`cvss_base_score_max`
+bracket the spread whenever that count exceeds one.
+
+Both are computed only over assessments sharing the winner's major version
+(`CVSS_METRIC_CONFIG`'s family), because a v2 score and a v3 score of the same
+CVE are readings on different scales -- their difference is a change of
+standard, not a disagreement between assessors.
+
+### SSVC
+
+`ssvcV203` is CISA's Stakeholder-Specific Vulnerability Categorization, a
+decision-tree triage rather than a numeric score. Only its three decision
+points (`exploitation`, `automatable`, `technicalImpact`, nested one level
+further inside `ssvcData.options[]` as a list of single-key objects) are
+folded on; the assessment's `source`, `role`, `version` and `timestamp` are
+dropped as scoring-process metadata. Where a CVE carries more than one SSVC
+assessment (145 of them do), the newest by `timestamp` wins.
 """
 
 from __future__ import annotations
@@ -181,7 +165,7 @@ CVSS_V4_ENVIRONMENTAL_FIELDS: Tuple[str, ...] = (
 )
 
 # Fields that are a lossless restatement of something else on the same record, so
-# keeping them stores the same fact twice across 583,026 score records:
+# keeping them stores the same fact twice:
 #
 #   - every enum metric is spelled out in `vectorString` (`AV:N/AC:L/...`);
 #   - `baseSeverity` is a fixed band table over `baseScore`;
@@ -194,10 +178,8 @@ CVSS_V4_ENVIRONMENTAL_FIELDS: Tuple[str, ...] = (
 # v4.0 omits a supplemental metric from the vector exactly when it is `NOT_DEFINED`,
 # which is what 97%+ of them are.
 #
-# What is NOT dropped: v2's five NVD-specific booleans (`acInsufInfo`,
-# `obtainAllPrivilege`, `obtainOtherPrivilege`, `obtainUserPrivilege`,
-# `userInteractionRequired`) have no vector representation and are genuinely
-# independent data.
+# What is NOT dropped: v2's five NVD-specific booleans (see CVSS_V2_KEPT_FIELDS) have
+# no vector representation and are genuinely independent data.
 CVSS_V2_DERIVED_FIELDS: Tuple[str, ...] = (
     "baseSeverity",
     "exploitabilityScore",
@@ -246,43 +228,56 @@ CVSS_V4_DERIVED_FIELDS: Tuple[str, ...] = (
     "providerUrgency",
 )
 
-# raw x_nvd_cvss key -> (entity type, relationship_type, fields to drop after flattening)
-CVSS_METRIC_CONFIG: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
-    "cvssMetricV2": ("cvss-v2-score", "has_cvss_v2_score", CVSS_V2_DERIVED_FIELDS),
-    "cvssMetricV30": ("cvss-v3-score", "has_cvss_v3_score", CVSS_V3_DERIVED_FIELDS),
-    "cvssMetricV31": ("cvss-v3-score", "has_cvss_v3_score", CVSS_V3_DERIVED_FIELDS),
-    "cvssMetricV40": (
-        "cvss-v4-score",
-        "has_cvss_v4_score",
-        CVSS_V4_ENVIRONMENTAL_FIELDS + CVSS_V4_DERIVED_FIELDS,
-    ),
+# raw x_nvd_cvss key -> (major-version family, fields to drop after flattening). The
+# family is what disagreement is measured within: v3.0 and v3.1 are the same scale
+# read slightly differently, whereas v2 and v3 are different scales entirely.
+CVSS_METRIC_CONFIG: Dict[str, Tuple[str, Tuple[str, ...]]] = {
+    "cvssMetricV2": ("v2", CVSS_V2_DERIVED_FIELDS),
+    "cvssMetricV30": ("v3", CVSS_V3_DERIVED_FIELDS),
+    "cvssMetricV31": ("v3", CVSS_V3_DERIVED_FIELDS),
+    "cvssMetricV40": ("v4", CVSS_V4_ENVIRONMENTAL_FIELDS + CVSS_V4_DERIVED_FIELDS),
 }
 
-# Two records that agree on everything except these say the same thing about the
-# vulnerability; the difference is only who said it.
-ASSESSOR_FIELDS: Tuple[str, ...] = ("source", "assessment_type")
+# Newer standard wins. v2 has been deprecated since 2019; v3.1 supersedes v3.0.
+CVSS_VERSION_PRECEDENCE: Dict[str, int] = {"4.0": 4, "3.1": 3, "3.0": 2, "2.0": 1}
 
 PRIMARY_ASSESSMENT = "Primary"
 
+# What a CVSS record asserts about the vulnerability, independent of who asserted it.
+# Two assessments agreeing on all three say the same thing; the difference is only
+# whose name is on it.
+CVSS_CLAIM_FIELDS: Tuple[str, ...] = ("version", "vector_string", "base_score")
+
+# Carried onto the vulnerability from the winning assessment, `cvss_`-prefixed.
+CVSS_KEPT_FIELDS: Tuple[str, ...] = (
+    "version",
+    "base_score",
+    "vector_string",
+    "source",
+    "assessment_type",
+)
+
+# v2-only NVD additions with no representation in the vector string, so unlike the
+# enum metrics they can't be recomputed and are kept when a v2 assessment wins.
+CVSS_V2_KEPT_FIELDS: Tuple[str, ...] = (
+    "ac_insuf_info",
+    "obtain_all_privilege",
+    "obtain_other_privilege",
+    "obtain_user_privilege",
+    "user_interaction_required",
+)
+
+CVSS_PREFIX = "cvss_"
+
 SSVC_METRIC_KEY = "ssvcV203"
-SSVC_ENTITY_TYPE = "ssvc-assessment"
-SSVC_RELATIONSHIP_TYPE = "has_ssvc_assessment"
+SSVC_PREFIX = "ssvc_"
 
-CVSS_ENTITY_TYPES: Tuple[str, ...] = ("cvss-v2-score", "cvss-v3-score", "cvss-v4-score")
-
-# entity type -> its edge type, derived from the config above so the two can't drift
-CVSS_RELATIONSHIP_TYPES: Dict[str, str] = {
-    entity_type: relationship_type
-    for entity_type, relationship_type, _ in CVSS_METRIC_CONFIG.values()
-}
+# SSVC's three decision points. Everything else on the assessment (`source`, `role`,
+# `version`, `timestamp`) is scoring-process metadata, not a fact about the CVE.
+SSVC_KEPT_FIELDS: Tuple[str, ...] = ("exploitation", "automatable", "technical_impact")
 
 OUTPUT_FILENAMES: Dict[str, str] = {
     "vulnerability": "vulnerabilities.json",
-    "cvss-v2-score": "cvss_v2_scores.json",
-    "cvss-v3-score": "cvss_v3_scores.json",
-    "cvss-v4-score": "cvss_v4_scores.json",
-    SSVC_ENTITY_TYPE: "ssvc_assessments.json",
-    "relationship": "relationships.json",
     EXTERNAL_RELATIONSHIP_KEY: "external_relationships.json",
 }
 
@@ -355,8 +350,8 @@ def normalize_keys(flat: Dict[str, Any]) -> Dict[str, Any]:
 
 def flatten_cvss_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     """Merge a cvssMetricV*[] entry's own fields with its nested cvssData fields into one
-    flat dict. `type` (Primary/Secondary) is renamed `assessment_type` so it doesn't collide
-    with the record's own `type` entity-kind discriminator."""
+    flat dict. `type` (Primary/Secondary) is renamed `assessment_type` so it doesn't
+    collide with the vulnerability record's own `type` discriminator once folded on."""
     flat: Dict[str, Any] = {}
     for key, value in entry.items():
         if key == "cvssData":
@@ -386,124 +381,88 @@ def flatten_ssvc_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     return normalize_keys(flat)
 
 
-def make_scored_entity(entity_type: str, cve_id: str, metric_key: str, index: int, flat: Dict[str, Any]) -> Dict[str, Any]:
-    seed = f"cve-preprocessing:{entity_type}:{cve_id}|{metric_key}|{index}|{json.dumps(flat, sort_keys=True)}"
-    entity_id = f"{entity_type}--{uuid.uuid5(uuid.NAMESPACE_URL, seed)}"
-    record: Dict[str, Any] = {"id": entity_id, "type": entity_type}
-    record.update(flat)
-    return record
-
-
-def flatten_all_cvss_entries(cvss: Dict[str, Any]) -> Dict[str, List[Tuple[str, int, Dict[str, Any]]]]:
+def flatten_all_cvss_entries(cvss: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
     """Flatten every cvssMetricV*[] entry on one CVE, dropping the derived fields, and
-    group them by entity type. Both reduction rules compare an entry against its
-    siblings on the same CVE, so none of them can be decided one entry at a time --
-    hence a pass that materializes them all before any is turned into a record.
-
-    Each entry keeps its position in the *raw* input list, which feeds the id seed, so
-    dropping one never re-ids the ones that survive alongside it."""
-    flattened: Dict[str, List[Tuple[str, int, Dict[str, Any]]]] = {
-        entity_type: [] for entity_type in CVSS_ENTITY_TYPES
-    }
-    for metric_key, (entity_type, _, drop_fields) in CVSS_METRIC_CONFIG.items():
-        for index, entry in enumerate(cvss.get(metric_key, [])):
+    tag each with its major-version family. Returned in `CVSS_METRIC_CONFIG` order,
+    which is fixed, so the selection below breaks ties the same way on every run."""
+    flattened: List[Tuple[str, Dict[str, Any]]] = []
+    for metric_key, (family, drop_fields) in CVSS_METRIC_CONFIG.items():
+        for entry in cvss.get(metric_key) or []:
             flat = flatten_cvss_entry(entry)
             for field in drop_fields:
                 flat.pop(snake_case(field), None)  # flatten_cvss_entry already normalized the keys
-            flattened[entity_type].append((metric_key, index, flat))
+            flattened.append((family, flat))
     return flattened
 
 
-def assessment_payload(flat: Dict[str, Any]) -> Tuple[Tuple[str, Any], ...]:
-    """What this record asserts about the vulnerability, with the identity of the
-    assessor removed. Keys are unique within a record, so sorting never has to
-    compare two values of different types."""
-    return tuple(sorted((key, value) for key, value in flat.items() if key not in ASSESSOR_FIELDS))
+def cvss_rank(candidate: Tuple[str, Dict[str, Any]]) -> Tuple[int, int, float]:
+    """Newer standard first, then NVD's own Primary over a CNA's Secondary, then the
+    higher base score. `max()` keeps the first of equal ranks, so a full tie resolves
+    to the earliest position in the raw input."""
+    _, flat = candidate
+    base_score = flat.get("base_score")
+    return (
+        CVSS_VERSION_PRECEDENCE.get(str(flat.get("version")), 0),
+        1 if flat.get("assessment_type") == PRIMARY_ASSESSMENT else 0,
+        float(base_score) if isinstance(base_score, (int, float)) else -1.0,
+    )
 
 
-def drop_superseded_v2(
-    flattened: Dict[str, List[Tuple[str, int, Dict[str, Any]]]]
-) -> int:
-    """CVSS v2 has been deprecated since 2019 and the loader's enrichment pass ranks it
-    below every v3, so a v2 score on a CVE that also carries a v3 one is never the score
-    anything reads -- it's kept only where it is genuinely the sole/fallback assessment.
-    Returns how many were dropped."""
-    if not flattened["cvss-v3-score"] or not flattened["cvss-v2-score"]:
-        return 0
-    dropped = len(flattened["cvss-v2-score"])
-    flattened["cvss-v2-score"] = []
-    return dropped
+def cvss_claim(flat: Dict[str, Any]) -> Tuple[Any, ...]:
+    """What this assessment says about the vulnerability, with the assessor's identity
+    removed -- so a Secondary echoing a Primary is one claim, not two."""
+    return tuple(flat.get(field) for field in CVSS_CLAIM_FIELDS)
 
 
-def drop_echoed_secondaries(
-    flattened: Dict[str, List[Tuple[str, int, Dict[str, Any]]]]
-) -> int:
-    """A CNA `Secondary` score that asserts exactly what NVD's `Primary` already asserts
-    adds a node and an edge to record agreement. Dropped; a Secondary that *differs* is
-    real disagreement and is kept. Compared within one entity type, so a v3.0 Secondary
-    can never be cancelled by a v3.1 Primary -- `version` is part of the payload.
-    Returns how many were dropped."""
-    dropped = 0
-    for entity_type, items in flattened.items():
-        primary_claims = {
-            assessment_payload(flat)
-            for _, _, flat in items
-            if flat.get("assessment_type") == PRIMARY_ASSESSMENT
-        }
-        if not primary_claims:
-            continue
-        kept = []
-        for item in items:
-            flat = item[2]
-            if flat.get("assessment_type") != PRIMARY_ASSESSMENT and assessment_payload(flat) in primary_claims:
-                dropped += 1
-                continue
-            kept.append(item)
-        flattened[entity_type] = kept
-    return dropped
+def fold_cvss(cvss: Dict[str, Any]) -> Dict[str, Any]:
+    """Collapse every CVSS assessment on one CVE into a flat set of `cvss_`-prefixed
+    properties: the winning assessment's own fields, plus a summary of how much the
+    assessments of that same major version disagreed."""
+    candidates = flatten_all_cvss_entries(cvss)
+    if not candidates:
+        return {}
 
+    winner_family, winner = max(candidates, key=cvss_rank)
+    family = [flat for family_name, flat in candidates if family_name == winner_family]
+    claims = {cvss_claim(flat) for flat in family}
 
-def build_cvss_and_ssvc(
-    obj: Dict[str, Any], cve_id: str
-) -> Tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]], Dict[str, int]]:
-    cvss = obj.get("x_nvd_cvss") or {}
-    entities: Dict[str, List[Dict[str, Any]]] = {entity_type: [] for entity_type in CVSS_ENTITY_TYPES}
-    entities[SSVC_ENTITY_TYPE] = []
-    relationships: List[Dict[str, Any]] = []
-
-    flattened = flatten_all_cvss_entries(cvss)
-    dropped = {
-        "cvss v2 scores superseded by a v3 score": drop_superseded_v2(flattened),
-        "Secondary scores echoing a Primary": drop_echoed_secondaries(flattened),
+    folded = {
+        f"{CVSS_PREFIX}{field}": winner[field] for field in CVSS_KEPT_FIELDS if field in winner
     }
+    folded[f"{CVSS_PREFIX}assessment_count"] = len(claims)
 
-    for entity_type in CVSS_ENTITY_TYPES:
-        relationship_type = CVSS_RELATIONSHIP_TYPES[entity_type]
-        for metric_key, index, flat in flattened[entity_type]:
-            entity = make_scored_entity(entity_type, cve_id, metric_key, index, flat)
-            entities[entity_type].append(entity)
-            relationships.append(make_relationship(cve_id, entity["id"], relationship_type))
+    if len(claims) > 1:
+        scores = [flat["base_score"] for flat in family if isinstance(flat.get("base_score"), (int, float))]
+        if scores:
+            folded[f"{CVSS_PREFIX}base_score_min"] = min(scores)
+            folded[f"{CVSS_PREFIX}base_score_max"] = max(scores)
 
-    for index, entry in enumerate(cvss.get(SSVC_METRIC_KEY, [])):
-        flat = flatten_ssvc_entry(entry)
-        entity = make_scored_entity(SSVC_ENTITY_TYPE, cve_id, SSVC_METRIC_KEY, index, flat)
-        entities[SSVC_ENTITY_TYPE].append(entity)
-        relationships.append(make_relationship(cve_id, entity["id"], SSVC_RELATIONSHIP_TYPE))
+    if winner_family == "v2":
+        folded.update(
+            {f"{CVSS_PREFIX}{field}": winner[field] for field in CVSS_V2_KEPT_FIELDS if field in winner}
+        )
+    return folded
 
-    return entities, relationships, dropped
+
+def fold_ssvc(cvss: Dict[str, Any]) -> Dict[str, Any]:
+    """Collapse a CVE's SSVC assessments into three `ssvc_`-prefixed decision points,
+    taken from the newest assessment by `timestamp`."""
+    entries = cvss.get(SSVC_METRIC_KEY) or []
+    if not entries:
+        return {}
+    newest = max(entries, key=lambda entry: str((entry.get("ssvcData") or {}).get("timestamp") or ""))
+    flat = flatten_ssvc_entry(newest)
+    return {f"{SSVC_PREFIX}{field}": flat[field] for field in SSVC_KEPT_FIELDS if field in flat}
 
 
 def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     result: Dict[str, List[Dict[str, Any]]] = {
         "vulnerability": [],
-        "relationship": [],
         EXTERNAL_RELATIONSHIP_KEY: [],
     }
-    for entity_type in CVSS_ENTITY_TYPES:
-        result[entity_type] = []
-    result[SSVC_ENTITY_TYPE] = []
 
     dropped_counts: Dict[str, int] = {}
+    folded_counts = {"with a CVSS score": 0, "with an SSVC assessment": 0, "with disputed CVSS scores": 0}
 
     for obj in objects:
         obj_type = str(obj.get("type") or "")
@@ -518,19 +477,27 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             continue
 
         cve_id = str(obj.get("name") or "")
-        result["vulnerability"].append(build_vulnerability_record(obj, cve_id))
-        result[EXTERNAL_RELATIONSHIP_KEY].extend(build_weakness_relationships(obj, cve_id))
+        record = build_vulnerability_record(obj, cve_id)
 
-        entities, relationships, reduced = build_cvss_and_ssvc(obj, cve_id)
-        for entity_type, records in entities.items():
-            result[entity_type].extend(records)
-        result["relationship"].extend(relationships)
-        for reason, count in reduced.items():
-            if count:
-                dropped_counts[reason] = dropped_counts.get(reason, 0) + count
+        cvss = obj.get("x_nvd_cvss") or {}
+        folded_cvss = fold_cvss(cvss)
+        folded_ssvc = fold_ssvc(cvss)
+        record.update(folded_cvss)
+        record.update(folded_ssvc)
+
+        if folded_cvss:
+            folded_counts["with a CVSS score"] += 1
+            if folded_cvss[f"{CVSS_PREFIX}assessment_count"] > 1:
+                folded_counts["with disputed CVSS scores"] += 1
+        if folded_ssvc:
+            folded_counts["with an SSVC assessment"] += 1
+
+        result["vulnerability"].append(record)
+        result[EXTERNAL_RELATIONSHIP_KEY].extend(build_weakness_relationships(obj, cve_id))
 
     dropped_summary = ", ".join(f"{count} {reason}" for reason, count in sorted(dropped_counts.items()))
     print(f"[cve-parser] parsed {len(objects)} objects; dropped {dropped_summary or 'nothing'}")
+    print("[cve-parser] folded " + ", ".join(f"{count} {reason}" for reason, count in folded_counts.items()))
     return result
 
 
@@ -562,8 +529,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--output-dir",
         default=str(default_output_dir),
         help=(
-            "Directory to write vulnerabilities.json / cvss_v2_scores.json / cvss_v3_scores.json / "
-            f"cvss_v4_scores.json / ssvc_assessments.json / relationships.json / external_relationships.json "
+            "Directory to write vulnerabilities.json / external_relationships.json "
             f"(default: {default_output_dir})"
         ),
     )
@@ -582,11 +548,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             "[cve-parser] wrote "
             f"{counts['vulnerability']} vulnerabilities, "
-            f"{counts['cvss-v2-score']} CVSS v2 scores, "
-            f"{counts['cvss-v3-score']} CVSS v3 scores, "
-            f"{counts['cvss-v4-score']} CVSS v4 scores, "
-            f"{counts[SSVC_ENTITY_TYPE]} SSVC assessments, "
-            f"{counts['relationship']} relationships, "
             f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external relationships "
             f"to {output_dir}"
         )
