@@ -1,125 +1,43 @@
-"""MITRE D3FEND field-projection preprocessor.
+"""MITRE D3FEND field-projection preprocessor. Full rationale in README.md.
 
-Reads five raw JSON files produced by the D3FEND crawler
+Reads five raw JSON files from the D3FEND crawler
 (`data-acquisition/mitre-defend/{techniques,tactics,artifacts,weaknesses,
-mappings}/latest.json`) and writes exactly two trimmed JSON files:
-`entities.json` (the `technique`/`tactic`/`artifact` records, distinguished
-by their own `type` field) and `relationships.json` (every edge in the
-dataset). `offensive-techniques/latest.json` is read by the crawler but not
-by this script (see below); `weaknesses/latest.json` is read here for its
-embedded `child_of`/`weakness_of`/`may_be_weakness_of` relationships but
-contributes no entity records -- both `offensive-technique` and `weakness`
-records are mirrors of another source in this project (ATT&CK techniques,
-CWE weaknesses respectively) with no local entity of their own anymore;
-join their relationship endpoints directly against
-`data-preprocessing/mitre-attack/entities.json` /
-`data-preprocessing/CWE/entities.json` by `id`.
+mappings}/latest.json`) and writes two files: `entities.json` (the
+`technique`/`tactic`/`artifact` records, distinguished by their own `type`) and
+`relationships.json` (every edge). `weaknesses/latest.json` is read for its
+embedded edges only, and `offensive-techniques/latest.json` isn't read at all:
+both are mirrors of another source here (CWE weaknesses, ATT&CK techniques) and
+were checked before dropping -- all 943 weakness ids and all 835
+offensive-technique ids exist in `CWE`/`mitre-attack`, and D3FEND's definitions
+were either a truncated prefix of ATT&CK's or identical to CWE's on 97.7% of
+records. Those endpoints join by bare id against the other source's
+`entities.json`.
 
-Both mirrors were checked before dropping: all 835 `offensive-technique`
-ids and all 943 `weakness` ids exist in their respective source. For
-`offensive-technique`, D3FEND's `definition` was consistently just a
-truncated prefix of ATT&CK's fuller `description` -- pure data loss, no
-unique content. `weakness` was closer: 97.7% of `definition`s were
-identical to CWE's `Description` after whitespace-normalizing, but the
-remainder had drifted independently in both directions (D3FEND fuller in
-17 cases, CWE fuller in 5), plus a handful of D3FEND-only `synonyms` and a
-single `comment` recovering content CWE's own preprocessor discards
-elsewhere. Dropped anyway, accepting that small residue, for the same
-"match id directly" reason as `offensive-technique`.
+D3FEND's own JSON is JSON-LD, not STIX: every record is keyed by an `@id` like
+`"d3f:CWE-1004"`, and most field names carry an `rdfs:`/`d3f:`/`owl:`/`skos:`
+prefix. Those raw keys contain a literal colon, awkward in a flattened output, so
+unlike CWE/CAPEC/ATT&CK every field here is renamed to plain snake_case, unified
+with the rest of the project (`d3f:definition` -> `description`; `d3f:synonym`
+plus `skos:altLabel` merged into `aliases`). JSON-LD also collapses a
+cardinality-1 value to a bare scalar (`as_list()` normalizes) and wraps typed
+literals as `{"@type": ..., "@value": ...}` (`literal_value()` unwraps).
+`_content_hash`/`_first_seen_at` (this project's own crawler bookkeeping) and
+`@type` (OWL class-membership boilerplate) are dropped from every record.
 
-D3FEND's own JSON is JSON-LD, not STIX -- every record is keyed by an `@id`
-like `"d3f:CWE-1004"` or `"d3f:T1055.001"`, and most fields carry an
-`rdfs:`/`d3f:`/`owl:`/`skos:` namespace prefix in the key itself (e.g.
-`"rdfs:label"`, `"d3f:synonym"`). Unlike CWE/CAPEC/ATT&CK -- where this
-project's preprocessors keep the source field names verbatim, because
-they're already clean identifiers -- every field here is renamed to a
-plain snake_case attribute (`name`, `definition`, `synonyms`, ...): a raw
-key containing a literal colon is awkward to carry into a flattened JSON
-output, unlike `x_capec_abstraction` or `ExtendedDescription`.
+No edge here carries a `source_name`. Stripping the `d3f:` prefix from every
+`@id` produces exactly the id strings (`CWE-1004`, `T1055.001`) that CWE and
+ATT&CK already use for the same concepts, so a dedicated external edge would
+express nothing beyond that identity -- unlike CAPEC's and CWE's genuinely
+different id spaces. Every endpoint uses the stripped `@id` rather than D3FEND's
+short code (`d3f:d3fend-id`, e.g. `D3-AMED`), which exists for `technique`
+records only and is kept there as a `d3fend_id` attribute.
 
-JSON-LD also collapses a cardinality-1 value to a bare scalar instead of a
-one-item list (the same quirk CWE's XML-to-JSON conversion has for its own
-single-vs-list fields) -- `as_list()` normalizes both shapes. `tactic`
-records also carry typed-literal values (`{"@type": "...integer", "@value":
-"3"}`) for a couple of fields -- `literal_value()` unwraps those.
-
-`_content_hash`/`_first_seen_at` are dropped from every record: they're
-this project's *own* crawler bookkeeping (D3FEND has no native timestamps
-at all, per the crawler's README), not domain content. `@type` is dropped
-too -- pure OWL/RDF class-membership boilerplate (`"owl:Class"`,
-`"owl:NamedIndividual"`), not analytically useful once the record already
-carries this project's own `type` discriminator.
-
-## Ids double as this dataset's own cross-references
-
-Stripping the fixed `d3f:` namespace prefix from every `@id` (the one
-normalization applied uniformly across every entity type and every
-relationship endpoint) happens to produce exactly the id strings
-(`CWE-1004`, `T1055.001`) that `data-preprocessing/CWE`/`mitre-attack`
-already use for the same underlying concepts -- see above. Given the id
-values are literally identical strings across datasets, there's nothing a
-dedicated external edge would express beyond that identity, unlike CAPEC's
-`CAPEC-N`/CWE's `CWE-N`, genuinely different id spaces for genuinely
-different entities referencing each other. So unlike every other
-preprocessor here, none of D3FEND's edges carry a `source_name` -- the
-cross-catalog ones are indistinguishable from the local ones, and that is
-the point.
-
-Because D3FEND provides a distinct human-facing short code
-(`d3f:d3fend-id`, e.g. `D3-AMED`) for `technique` records only, every
-relationship in this dataset uses the stripped `@id` as `source_ref`/
-`target_ref` throughout, not `d3fend-id`, so there's one consistent join
-key across every type. `d3fend_id` is kept as an extra attribute on
-`technique` records only, for citing D3FEND's own short code.
-
-## What becomes a relationship
-
-- `artifact.rdfs:hasSubClass` -> `has_subclass` edges (artifact -> child
-  artifact). Verified to resolve 100% within this dataset's own artifacts.
-- `weakness.rdfs:subClassOf` -> `child_of` edges (weakness -> parent
-  weakness), the same relationship_type CWE's own preprocessor uses for
-  the analogous edge. 10 of 1,113 parent refs point at the abstract root
-  class `d3f:Weakness` itself rather than another weakness and are
-  dropped, not emitted as edges to a non-entity.
-- `weakness.d3f:weakness-of` / `d3f:may-be-weakness-of` -> `weakness_of` /
-  `may_be_weakness_of` edges (weakness -> artifact). Both verified to
-  resolve 100% into this dataset's own artifacts.
-- `tactic.rdfs:subClassOf` is **dropped entirely, with no relationship
-  emitted** -- every one of the 7 tactics points at the same abstract root
-  class `d3f:DefensiveTactic`, not at another tactic; there is no real
-  tactic-to-tactic hierarchy in this data.
-- `mappings/latest.json` (14,003 flattened SPARQL-result rows, one per
-  defense/offense trace) is mined for three kinds of edges, each
-  deduplicated against the full row set rather than kept as 14,003 raw
-  rows:
-  - `technique --{def_artifact_rel_label}--> artifact` (166 unique edges,
-    e.g. `analyzes`, `filters`, `isolates`) -- a fact not available
-    anywhere else in this dataset (the technique records alone carry no
-    artifact relation).
-  - `technique --enables--> tactic` (149 edges, one per technique --
-    verified stable: every technique maps to exactly one tactic across
-    every row it appears in).
-  - `offensive-technique --{off_artifact_rel_label}--> artifact` (482
-    unique edges, e.g. `modifies`, `may-modify`, `creates`) -- likewise
-    D3FEND-only information layered onto the ATT&CK technique mirror.
-  - `technique --counters--> offensive-technique` (3,544 unique edges) --
-    the dataset's headline fact. Kept with `def_artifact`/
-    `def_artifact_rel`/`off_artifact`/`off_artifact_rel` as edge
-    attributes, since those explain *why* the technique counters that
-    specific offensive technique (the same artifact, acted on by both
-    sides, is the bridge). A `(technique, offensive-technique)` pair can
-    legitimately have more than one such edge, if more than one
-    artifact-bridge justifies the same pairing (3,544 edges cover 3,234
-    distinct pairs).
-  - `mapping`'s `off_tech_parent`/`off_tactic` and their `*_rel` fields are
-    **not** turned into edges: they're the ATT&CK-side sub-technique and
-    tactic facts, already fully captured by `data-preprocessing/mitre-attack`'s
-    own `subtechnique-of` and `has_tactic` relationships -- re-deriving
-    them here would just duplicate that dataset. `query_def_tech_label`/
-    `top_def_tech_label` are dropped for a different reason: they carry no
-    id at all (only a label), and were confirmed to be other rungs of the
-    technique hierarchy that happened to anchor the SPARQL query that
-    produced the row, not a fact about `def_tech` itself.
+Edges come from the entity domains' own ref fields (`has_subclass`, `child_of`,
+`weakness_of`, `may_be_weakness_of`) and from mining `mappings/latest.json`'s
+14,003 SPARQL-result rows, deduplicated against the full row set, for
+`technique --{relation}--> artifact`, `technique --enables--> tactic`,
+`offensive-technique --{relation}--> artifact`, and the dataset's headline fact,
+`technique --counters--> offensive-technique`.
 """
 
 from __future__ import annotations
@@ -141,22 +59,33 @@ DOMAIN_FILES: Dict[str, str] = {
 }
 
 D3F_PREFIX = "d3f:"
+D3FEND_URI_PREFIX = "http://d3fend.mitre.org/ontologies/d3fend.owl#"
+
+# 10 of 1,113 weakness parent refs point at this abstract root class rather than another
+# weakness, so they'd be edges to a non-entity. (The 7 tactics' `rdfs:subClassOf` is
+# dropped for the same reason: all 7 point at `d3f:DefensiveTactic`, so there is no real
+# tactic-to-tactic hierarchy to emit.)
 ABSTRACT_WEAKNESS_ROOT = "Weakness"
 
 HAS_SUBCLASS_RELATIONSHIP_TYPE = "has_subclass"
-CHILD_OF_RELATIONSHIP_TYPE = "child_of"
+CHILD_OF_RELATIONSHIP_TYPE = "child_of"  # same relationship_type CWE uses for its analogous edge
 WEAKNESS_OF_RELATIONSHIP_TYPE = "weakness_of"
 MAY_BE_WEAKNESS_OF_RELATIONSHIP_TYPE = "may_be_weakness_of"
 ENABLES_RELATIONSHIP_TYPE = "enables"
 COUNTERS_RELATIONSHIP_TYPE = "counters"
 
+WEAKNESS_REF_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("d3f:weakness-of", WEAKNESS_OF_RELATIONSHIP_TYPE),
+    ("d3f:may-be-weakness-of", MAY_BE_WEAKNESS_OF_RELATIONSHIP_TYPE),
+)
+
+DEFINITION_SEPARATOR = "\n\n"
+
 ENTITIES_FILENAME = "entities.json"
 RELATIONSHIPS_FILENAME = "relationships.json"
 
-# Which `parse()` result keys hold edges; every other key holds entities. The keys
-# themselves stay per-kind so the run summary can still report a breakdown, but they
-# no longer map to a file each -- output is exactly two files, and a record's own
-# `type` field is what distinguishes the kinds inside them.
+# Which `parse()` result keys hold edges; the rest hold entities. Keys stay per-kind so
+# the run summary can report a breakdown, but they no longer map to a file each.
 RELATIONSHIP_KEYS: Tuple[str, ...] = ("relationship",)
 
 
@@ -181,9 +110,7 @@ def strip_prefix(curie: Optional[str]) -> Optional[str]:
 
 
 def ref_id(ref: Any) -> Optional[str]:
-    if isinstance(ref, dict):
-        return strip_prefix(ref.get("@id"))
-    return None
+    return strip_prefix(ref.get("@id")) if isinstance(ref, dict) else None
 
 
 def as_list(value: Any) -> List[Any]:
@@ -194,16 +121,13 @@ def as_list(value: Any) -> List[Any]:
 
 def literal_value(value: Any) -> Any:
     """Unwrap a JSON-LD typed literal ({"@type": "...", "@value": "3"}) to a plain value."""
-    if isinstance(value, dict) and "@value" in value:
-        return value["@value"]
-    return value
+    return value["@value"] if isinstance(value, dict) and "@value" in value else value
 
 
 def make_relationship(source_ref: str, target_ref: str, relationship_type: str, **extra: Any) -> Dict[str, Any]:
     seed_parts = [source_ref, relationship_type, target_ref]
     seed_parts.extend(f"{key}={extra[key]}" for key in sorted(extra))
-    seed = "mitre-defend-preprocessing:" + "|".join(seed_parts)
-    relationship_uuid = uuid.uuid5(uuid.NAMESPACE_URL, seed)
+    relationship_uuid = uuid.uuid5(uuid.NAMESPACE_URL, "mitre-defend-preprocessing:" + "|".join(seed_parts))
     record: Dict[str, Any] = {
         "id": f"relationship--{relationship_uuid}",
         "type": "relationship",
@@ -215,21 +139,10 @@ def make_relationship(source_ref: str, target_ref: str, relationship_type: str, 
     return record
 
 
-# --------------------------------------------------------------------------
-# Entity record builders
-# --------------------------------------------------------------------------
-
-DEFINITION_SEPARATOR = "\n\n"
-
-
 def apply_aliases(record: Dict[str, Any], *sources: Any) -> None:
-    """Merge D3FEND's alternate-name fields into one `aliases` list property.
-
-    D3FEND splits alternate names across `d3f:synonym` and `skos:altLabel`; the 8
-    artifacts carrying both have no value in common, so unioning them loses nothing.
-    `aliases` is the name CWE/CAPEC/ATT&CK records use for the same concept -- these
-    were the last of the four different spellings this project had for it.
-    """
+    """Merge D3FEND's `d3f:synonym`/`skos:altLabel` into one `aliases` list -- the name
+    CWE/CAPEC/ATT&CK use for the same concept. The 8 artifacts carrying both have no
+    value in common, so unioning them loses nothing."""
     merged: List[str] = []
     for source in sources:
         merged.extend(value for value in as_list(source) if value)
@@ -238,11 +151,7 @@ def apply_aliases(record: Dict[str, Any], *sources: Any) -> None:
 
 
 def build_technique_record(raw: Dict[str, Any]) -> Dict[str, Any]:
-    record: Dict[str, Any] = {
-        "id": strip_prefix(raw["@id"]),
-        "type": "technique",
-        "name": raw.get("rdfs:label"),
-    }
+    record: Dict[str, Any] = {"id": strip_prefix(raw["@id"]), "type": "technique", "name": raw.get("rdfs:label")}
     if raw.get("d3f:d3fend-id"):
         record["d3fend_id"] = raw["d3f:d3fend-id"]
     apply_aliases(record, raw.get("d3f:synonym"))
@@ -250,42 +159,30 @@ def build_technique_record(raw: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_tactic_record(raw: Dict[str, Any]) -> Dict[str, Any]:
-    record: Dict[str, Any] = {
-        "id": strip_prefix(raw["@id"]),
-        "type": "tactic",
-        "name": raw.get("rdfs:label"),
-    }
+    record: Dict[str, Any] = {"id": strip_prefix(raw["@id"]), "type": "tactic", "name": raw.get("rdfs:label")}
     if raw.get("d3f:definition"):
         record["description"] = raw["d3f:definition"]
-    if "d3f:display-order" in raw:
-        record["display_order"] = int(literal_value(raw["d3f:display-order"]))
-    if "d3f:display-priority" in raw:
-        record["display_priority"] = int(literal_value(raw["d3f:display-priority"]))
+    for source_field, out_field in (("d3f:display-order", "display_order"), ("d3f:display-priority", "display_priority")):
+        if source_field in raw:
+            record[out_field] = int(literal_value(raw[source_field]))
     return record
 
 
 def build_artifact_record(raw: Dict[str, Any]) -> Dict[str, Any]:
     labels = as_list(raw.get("rdfs:label"))
-    record: Dict[str, Any] = {
-        "id": strip_prefix(raw["@id"]),
-        "type": "artifact",
-        "name": labels[0] if labels else None,
-    }
+    record: Dict[str, Any] = {"id": strip_prefix(raw["@id"]), "type": "artifact", "name": labels[0] if labels else None}
     definitions = as_list(raw.get("d3f:definition"))
     if definitions:
-        # 8 artifacts carry several genuinely different definitions (one per
-        # industrial protocol); joined so `description` is a string everywhere it
-        # appears rather than a string on most records and a list on 8.
+        # 8 artifacts carry several genuinely different definitions (one per industrial
+        # protocol); joined so `description` is a string everywhere rather than a list on 8
         record["description"] = DEFINITION_SEPARATOR.join(definitions)
     apply_aliases(record, raw.get("d3f:synonym"), raw.get("skos:altLabel"))
     return record
 
 
-# --------------------------------------------------------------------------
-# Relationships from the five entity domains' own embedded ref fields
-# --------------------------------------------------------------------------
-
 def build_artifact_relationships(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """`rdfs:hasSubClass` -> artifact -> child artifact. Resolves 100% within this
+    dataset's own artifacts."""
     source_ref = strip_prefix(raw["@id"])
     return [
         make_relationship(source_ref, target_ref, HAS_SUBCLASS_RELATIONSHIP_TYPE)
@@ -295,28 +192,20 @@ def build_artifact_relationships(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def build_weakness_relationships(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """`rdfs:subClassOf` -> weakness -> parent weakness, plus the two `weakness-of`
+    fields pointing at artifacts (both resolve 100% into this dataset's artifacts)."""
     source_ref = strip_prefix(raw["@id"])
     relationships = []
     for parent in as_list(raw.get("rdfs:subClassOf")):
         target_ref = ref_id(parent)
         if target_ref and target_ref != ABSTRACT_WEAKNESS_ROOT:
             relationships.append(make_relationship(source_ref, target_ref, CHILD_OF_RELATIONSHIP_TYPE))
-    for target in as_list(raw.get("d3f:weakness-of")):
-        target_ref = ref_id(target)
-        if target_ref:
-            relationships.append(make_relationship(source_ref, target_ref, WEAKNESS_OF_RELATIONSHIP_TYPE))
-    for target in as_list(raw.get("d3f:may-be-weakness-of")):
-        target_ref = ref_id(target)
-        if target_ref:
-            relationships.append(make_relationship(source_ref, target_ref, MAY_BE_WEAKNESS_OF_RELATIONSHIP_TYPE))
+    for source_field, relationship_type in WEAKNESS_REF_FIELDS:
+        for target in as_list(raw.get(source_field)):
+            target_ref = ref_id(target)
+            if target_ref:
+                relationships.append(make_relationship(source_ref, target_ref, relationship_type))
     return relationships
-
-
-# --------------------------------------------------------------------------
-# Relationships mined from the flattened `mapping` export
-# --------------------------------------------------------------------------
-
-D3FEND_URI_PREFIX = "http://d3fend.mitre.org/ontologies/d3fend.owl#"
 
 
 def mapping_value(row: Dict[str, Any], key: str) -> Optional[str]:
@@ -336,6 +225,13 @@ def relationship_type_from_label(label: str) -> str:
 
 
 def build_mapping_relationships(mapping_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Mine the flattened SPARQL export for four kinds of edge, deduplicated across all
+    rows. `counters` keeps the four artifact-bridge fields as edge attributes because
+    they explain *why* the technique counters that offensive technique -- so one
+    (technique, offensive-technique) pair can legitimately carry more than one edge.
+    `off_tech_parent`/`off_tactic` are skipped: mitre-attack already emits those facts.
+    `query_def_tech_label`/`top_def_tech_label` are skipped too -- they carry no id, and
+    name other rungs of the technique hierarchy that anchored the query, not `def_tech`."""
     technique_artifact: Set[Tuple[str, str, str]] = set()
     technique_tactic: Set[Tuple[str, str]] = set()
     offensive_technique_artifact: Set[Tuple[str, str, str]] = set()
@@ -382,12 +278,7 @@ def build_mapping_relationships(mapping_rows: Sequence[Dict[str, Any]]) -> List[
 
 
 def parse(domains: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
-    result: Dict[str, List[Dict[str, Any]]] = {
-        "technique": [],
-        "tactic": [],
-        "artifact": [],
-        "relationship": [],
-    }
+    result: Dict[str, List[Dict[str, Any]]] = {"technique": [], "tactic": [], "artifact": [], "relationship": []}
 
     for raw in domains["technique"]:
         result["technique"].append(build_technique_record(raw))
@@ -412,61 +303,47 @@ def parse(domains: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, 
     return result
 
 
-def write_json(path: Path, records: List[Dict[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(records, handle, indent=2)
-        handle.write("\n")
-
-
 def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> Dict[str, int]:
     """Write every entity record to entities.json and every edge to relationships.json,
     concatenated in `result`'s own insertion order so reruns are byte-stable."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    entities: List[Dict[str, Any]] = []
-    relationships: List[Dict[str, Any]] = []
+    files: Dict[str, List[Dict[str, Any]]] = {ENTITIES_FILENAME: [], RELATIONSHIPS_FILENAME: []}
     for key, records in result.items():
-        (relationships if key in RELATIONSHIP_KEYS else entities).extend(records)
-    write_json(output_dir / ENTITIES_FILENAME, entities)
-    write_json(output_dir / RELATIONSHIPS_FILENAME, relationships)
+        files[RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME].extend(records)
+    for filename, records in files.items():
+        with (output_dir / filename).open("w", encoding="utf-8") as handle:
+            json.dump(records, handle, indent=2)
+            handle.write("\n")
     return {key: len(records) for key, records in result.items()}
+
+
+def format_counts(counts: Dict[str, int], keys: Sequence[str]) -> str:
+    """Total plus per-kind breakdown: `1193 (271 technique, 7 tactic, 915 artifact)`."""
+    breakdown = ", ".join(f"{counts[key]} {key}" for key in keys if counts[key])
+    return f"{sum(counts[key] for key in keys)} ({breakdown})"
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     script_dir = Path(__file__).resolve().parent
     default_input = script_dir.parent.parent / "data-acquisition" / "mitre-defend"
-    default_output_dir = script_dir
 
     parser = argparse.ArgumentParser(description="Trim D3FEND's JSON-LD domains down to a fixed field whitelist and extract relationships")
-    parser.add_argument(
-        "--input",
-        default=str(default_input),
-        help=f"Path to the D3FEND crawler's workspace directory (default: {default_input})",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default=str(default_output_dir),
-        help=f"Directory to write entities.json / relationships.json (default: {default_output_dir})",
-    )
+    parser.add_argument("--input", default=str(default_input), help=f"Path to the D3FEND crawler's workspace directory (default: {default_input})")
+    parser.add_argument("--output-dir", default=str(script_dir), help=f"Directory to write entities.json / relationships.json (default: {script_dir})")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    input_dir = Path(args.input)
     output_dir = Path(args.output_dir)
 
     try:
-        domains = {domain: load_domain(input_dir, domain) for domain in DOMAIN_FILES}
-        result = parse(domains)
-        counts = write_outputs(result, output_dir)
-        entity_total = sum(count for key, count in counts.items() if key not in RELATIONSHIP_KEYS)
+        domains = {domain: load_domain(Path(args.input), domain) for domain in DOMAIN_FILES}
+        counts = write_outputs(parse(domains), output_dir)
+        entity_keys = [key for key in counts if key not in RELATIONSHIP_KEYS]
         print(
-            f"[mitre-defend-parser] wrote {entity_total} entities to {ENTITIES_FILENAME} "
-            f"({counts['technique']} techniques, "
-            f"{counts['tactic']} tactics, "
-            f"{counts['artifact']} artifacts) and "
-            f"{counts['relationship']} relationships to {RELATIONSHIPS_FILENAME}, "
-            f"in {output_dir}"
+            f"[mitre-defend-parser] wrote {format_counts(counts, entity_keys)} entities to {ENTITIES_FILENAME} "
+            f"and {counts['relationship']} relationships to {RELATIONSHIPS_FILENAME}, in {output_dir}"
         )
         return 0
     except (ParseError, OSError, json.JSONDecodeError) as exc:

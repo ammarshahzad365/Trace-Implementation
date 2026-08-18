@@ -1,22 +1,18 @@
 # CWE Preprocessing
 
-Trims the raw CWE bundle (`data-acquisition/CWE/latest.json`) down to a
-fully flattened, relationship-linked pair of JSON files: `entities.json`
-and `relationships.json`, with each record's own `type` field
-distinguishing the kinds inside them.
+Trims the raw CWE bundle (`data-acquisition/CWE/latest.json`) into a fully
+flattened, relationship-linked pair of files — `entities.json` and
+`relationships.json` — with each record's own `type` distinguishing the kinds
+inside.
 
-CWE's own JSON is a generic XML-to-JSON conversion, not native STIX — every
-relation (`RelatedWeaknesses`, `RelatedAttackPatterns`,
-`ObservedExamples`, `Relationships.HasMember`,
-`Members.HasMember`) starts out embedded inline on the entity record
-itself, and so do several *attribute*-shaped fields that themselves nest
-sub-records (`CommonConsequences`, `ApplicablePlatforms`,
-`ModesOfIntroduction`, `PotentialMitigations`, `DetectionMethods`). This
-script pulls every one of those out into its own `relationship` object
-(`id`, `type`, `relationship_type`, `source_ref`, `target_ref`, plus a few
-relationship-specific attributes) and removes the source field from the
-entity record, so entities and relationships are stored completely
-separately — the same split `capec_preprocessing.py` uses.
+CWE's JSON is a generic XML-to-JSON conversion, not native STIX, so every
+relation (`RelatedWeaknesses`, `RelatedAttackPatterns`, `ObservedExamples`,
+`Relationships.HasMember`, `Members.HasMember`) starts out embedded on the
+entity, and so do several *attribute*-shaped fields that nest sub-records
+(`CommonConsequences`, `ApplicablePlatforms`, `ModesOfIntroduction`,
+`PotentialMitigations`, `DetectionMethods`). This script pulls all of it into
+`relationship` records and removes the source field, so entities and edges are
+stored separately — the same split `capec_preprocessing.py` uses.
 
 ## Usage
 
@@ -24,171 +20,129 @@ separately — the same split `capec_preprocessing.py` uses.
 py cwe_preprocessing.py
 ```
 
-Optional flags: `--input` (path to `latest.json`, default: the CWE
-crawler's own output) and `--output-dir` (default: this folder).
+Optional flags: `--input` (path to `latest.json`, default: the CWE crawler's own
+output) and `--output-dir` (default: this folder).
 
 ## Field names are snake_cased; `AlternateTerms` becomes a property
 
-CWE's source XML uses PascalCase element names (`Name`, `LikelihoodOfExploit`,
-`ExtendedDescription`). Every other source in this project emits snake_case,
-so output field names are normalized to match — `name`,
-`likelihood_of_exploit`, `extended_description`. One rename isn't mechanical:
-a view's `Type` would collide with the `type` field carrying the record's own
-entity kind, so it becomes `view_type`.
+CWE's XML uses PascalCase (`Name`, `LikelihoodOfExploit`); every other source
+here emits snake_case, so output names are normalized to match. One rename isn't
+mechanical: a view's `Type` would collide with the `type` carrying the record's
+own kind, so it becomes `view_type`.
 
-`AlternateTerms` used to become `also_known_as` edges whose `target_ref` was
-the alias *text* — but an alias isn't an entity, so all 189 of those edges
-pointed at nothing that exists anywhere in this project, and loading them into
-a graph would have invented a phantom node per alias string. They're now an
-`aliases` list property on the weakness instead, which is also the name
-CAPEC/ATT&CK/D3FEND records use for the same concept (this project previously
-had four different spellings for it). 105 of the terms carry an explanatory
-note, kept as self-labelling `"term -- note"` strings in a parallel
-`alias_notes` property rather than an index-aligned second list, since Cypher
-can't enforce alignment.
-
-One `ObservedExample` reference (`CVE-2002-216`, on CWE-837) isn't shaped like
-a real CVE id and is dropped with a warning rather than emitted as an edge to
-something that cannot exist. Four *well-formed* CVE references remain
-unresolvable — CWE cites CVEs that the CVE side of this project doesn't
-contain, one because NVD marks it `Rejected` (and `cve_preprocessing.py` drops
-all 17,655 rejected records) and the rest because they aren't in the NVD
-snapshot at all. Those are left in place: they're correct citations, and
-`data-loading/` reports and skips them rather than inventing the nodes.
+`AlternateTerms` used to become `also_known_as` edges whose `target_ref` was the
+alias *text* — but an alias isn't an entity, so all 189 pointed at nothing that
+exists and would have invented a phantom node per string. They're now an
+`aliases` list property, also the name CAPEC/ATT&CK/D3FEND use for the concept
+(the project previously had four spellings for it). 105 terms carry a note, kept
+as self-labelling `"term -- note"` strings in `alias_notes` rather than an
+index-aligned second list, since Cypher can't enforce alignment.
 
 ## What it does
 
-- Keeps `weakness`, `category`, and `view` objects, each reduced to a
-  whitelist of fields (see `cwe_preprocessing.py`'s `*_FIELDS` constants for
-  the exact list). A field missing on a given record (most non-common
-  fields are optional) is simply omitted, not written as `null`.
-- Drops the redundant raw `ID` field (duplicate of `cwe_id`) and
-  `MappingNotes` from every record. Also drops `References`, `Notes`,
-  `Diagram`, and `DemonstrativeExamples` from `weakness`; `References`/
-  `Notes` from `category`; `References`/`Notes`/`Filter` from `view` —
-  bibliographic citations, free-text notes, an image path, and semi-HTML
-  example markup, none of which have an extractable entity or edge in this
-  bundle (CWE's own bibliography content isn't part of this crawl).
-- The following fields are removed from their entity record and rebuilt as
-  relationship records instead:
-  - `weakness.RelatedWeaknesses` → one edge per
-    `RelatedWeakness` entry. `relationship_type` is the `Nature` value
-    lower-snake-cased (`child_of`, `can_precede`, `peer_of`, `can_also_be`,
-    `requires`, `starts_with`); `ordinal`/`view_id` are kept as edge
-    attributes when present. Every edge is stored exactly as it appears in
-    the source, with no deduping or canonicalizing: CWE's data already
-    stores only one direction for every `Nature` except `PeerOf`, and even
-    `PeerOf` is reciprocal in just 16 of its 98 pairs, so collapsing would
-    silently drop real one-directional edges rather than remove redundancy.
-  - `category.Relationships.HasMember` / `view.Members.HasMember` →
-    `has_member` edges from the category/view to each
-    member weakness, with `view_id` kept as an edge attribute.
-  - `weakness.RelatedAttackPatterns` →
-    `CWE-N --related-to--> CAPEC-N` edges (`source_name: "capec"`) — the
-    reverse direction of CAPEC's own `CAPEC-N --related-to--> CWE-N` edges.
-  - `weakness.ObservedExamples` →
-    `CWE-N --related-to--> CVE-N` edges (`source_name: "cve"`), with
-    `description`/`link` as edge attributes. Examples whose `Reference` is a
-    bare bibliography id instead of a CVE (e.g. `[REF-1374]`) are dropped,
-    not extracted, since outward-pointing edges are scoped to CVE/CAPEC
-    only.
-  - Those last two are the only edges carrying a `source_name`, which is
-    what marks an edge as pointing outside this bundle. They share
-    `relationships.json` with the internal edges rather than sitting in a
-    file of their own.
-  - Relationship records get a deterministic `relationship--<uuid5>` id.
-    Unlike CAPEC's version of this helper, the seed also folds in every
-    extra edge attribute (not just `source_ref`/`relationship_type`/
-    `target_ref`), because CWE edges can legitimately repeat with the same
-    source/type/target but different attributes — e.g. the same `ChildOf`
-    pair recorded once per `View_ID`. Reruns against the same input still
-    produce byte-identical output.
+- Keeps `weakness`, `category` and `view`, each reduced to a whitelist
+  (`*_FIELDS` in the script). A missing field is omitted, not written as `null`.
+- Drops the redundant `ID` (duplicate of `cwe_id`) and `MappingNotes` from every
+  record; `References`, `Notes`, `Diagram` and `DemonstrativeExamples` from
+  `weakness`; `References`/`Notes` from `category`; `References`/`Notes`/`Filter`
+  from `view` — bibliographic citations, free-text notes, an image path, and
+  semi-HTML example markup, none with an extractable entity or edge here (CWE's
+  own bibliography isn't part of this crawl).
+- These fields are removed from the entity and rebuilt as edges:
+  - `weakness.RelatedWeaknesses` → one edge per entry, `relationship_type` being
+    the `Nature` lower-snake-cased (`child_of`, `can_precede`, `peer_of`,
+    `can_also_be`, `requires`, `starts_with`), with `ordinal`/`view_id` as edge
+    attributes. Stored exactly as given, with no deduping or canonicalizing:
+    CWE already stores one direction for every Nature except `PeerOf`, and even
+    `PeerOf` is reciprocal in just 16 of 98 pairs, so collapsing would drop real
+    one-directional edges rather than remove redundancy.
+  - `category.Relationships.HasMember` / `view.Members.HasMember` → `has_member`
+    edges to each member weakness, with `view_id` as an edge attribute.
+  - `weakness.RelatedAttackPatterns` → `CWE-N --related-to--> CAPEC-N`
+    (`source_name: "capec"`), the reverse of CAPEC's own edges.
+  - `weakness.ObservedExamples` → `CWE-N --related-to--> CVE-N`
+    (`source_name: "cve"`), with `description`/`link` as edge attributes.
+    References that are a bare bibliography id (`[REF-1374]`) are dropped, since
+    outward edges are scoped to CVE/CAPEC only.
+  - Those last two are the only edges carrying `source_name`, which is what marks
+    an edge as pointing outside this bundle; they share `relationships.json` with
+    the internal edges rather than sitting in a file of their own.
+- Every edge gets a deterministic `relationship--<uuid5>` id. Unlike CAPEC's
+  helper, the seed folds in every extra attribute, because CWE edges legitimately
+  repeat with the same source/type/target but different attributes — e.g. one
+  `ChildOf` pair recorded once per `View_ID`. Reruns stay byte-identical.
+
+One `ObservedExample` reference (`CVE-2002-216`, on CWE-837) isn't shaped like a
+real CVE id and is dropped with a warning rather than emitted as an edge to
+something that cannot exist. Four *well-formed* references remain unresolvable —
+CWE cites CVEs the CVE side of this project doesn't contain, one because NVD
+marks it `Rejected` (and `cve_preprocessing.py` drops all 17,958 rejected
+records) and the rest because they aren't in the NVD snapshot. Those are left in
+place: they're correct citations, and `data-loading/` reports and skips them
+rather than inventing the nodes.
 
 ## Sub-records with a reused identity become shared nodes; the rest stay private
 
-`ApplicablePlatforms`, `PotentialMitigations`, and `DetectionMethods` each
-carry a natural identity that's reused across many different weaknesses —
-platforms by `(category, name)` (e.g. every weakness applicable to
-`Language: Java` shares one node), mitigations by `Mitigation_ID` (70
-distinct ids span 1,710 usages), detection methods by `Detection_Method_ID`
-(23 distinct ids span 959 usages). But the *content* alongside that
-identity — `Prevalence`, `Phase`, `Effectiveness`, `Description`,
-`EffectivenessNotes` — genuinely varies by which weakness references it
-(verified: 30/70 `Mitigation_ID`s and 9/23 `Detection_Method_ID`s have
-different content across their usages). So the shared node holds only the
-stable identity, and every variable field moves onto the
-`has_mitigation`/`has_detection_method`/`applies_to_platform` relationship
-as an edge attribute instead — the same convention this project already
-uses for CWE's own `RelatedWeaknesses` edges (`ordinal`/`view_id` live on
-the edge, not duplicated onto the target weakness).
+`ApplicablePlatforms`, `PotentialMitigations` and `DetectionMethods` each carry a
+natural identity reused across many weaknesses — platforms by `(category, name)`
+(every weakness applicable to `Language: Java` shares one node), mitigations by
+`Mitigation_ID` (70 ids span 1,710 usages), detection methods by
+`Detection_Method_ID` (23 span 959). But the *content* alongside that identity —
+`Prevalence`, `Phase`, `Effectiveness`, `Description`, `EffectivenessNotes` —
+genuinely varies per referencing weakness (verified: 30/70 `Mitigation_ID`s and
+9/23 `Detection_Method_ID`s differ across usages). So the shared node holds only
+the stable identity and every variable field moves onto the
+`has_mitigation`/`has_detection_method`/`applies_to_platform` edge — the same
+convention `RelatedWeaknesses` already uses for `ordinal`/`view_id`.
 
-Mitigations/detection methods with no id at all (the majority — 1,183/1,710
-and 476/959) are never reused, so putting their detail on the edge would
-leave the node itself completely empty (just `{id, type}`, an edge pointing
-at nothing). Since a private node is referenced by exactly one edge, there's
-no cross-usage conflict to guard against for it, so these instead get their
-detail (`phase`/`strategy`/`effectiveness`/`description`/
-`effectiveness_notes` for mitigations, `method`/`effectiveness`/
-`description`/`effectiveness_notes` for detection methods) put directly on
-the node, with no attributes on the edge at all — no edge in this dataset
-ever points at a content-free node. Platform entries with no `Name` at all
-(an anonymous `Technology`/etc. entry) get their own private node the same
-way, keeping only `category`; they don't have the empty-node problem since
-`category` is always present.
+Mitigations and detection methods with no id (the majority — 1,183/1,710 and
+476/959) are never reused, so edge-side detail would leave the node empty (just
+`{id, type}`). A private node is referenced by exactly one edge, so there's no
+cross-usage conflict to guard against; these get their detail on the node
+instead, with no edge attributes at all. No edge in this dataset ever points at
+a content-free node. Unnamed platform entries get a private node the same way,
+keeping only `category`, which is always present.
 
-The same identity-reuse logic extends to two more fields that weren't
-originally expected to behave like a catalog but turned out to, once
-inspected: `CommonConsequences.Consequence` (deduped by its
-`(scope, impact)` pair — 113 of 311 distinct combinations recur across more
-than one weakness, covering 1,039 of 1,237 total entries) and
-`ModesOfIntroduction.Introduction` (deduped by `Phase` — only 16 distinct
-phases across 1,398 entries, e.g. every weakness introduced during
-`Implementation` shares one node). `Likelihood`/`Note` on consequences and
-`Note` on introductions are per-weakness commentary, so they follow the
-same rule and live on the edge (`has_consequence`/`introduced_in`).
+The same logic extends to two fields that weren't expected to behave like a
+catalog but do: `CommonConsequences.Consequence` (deduped by `(scope, impact)` —
+113 of 311 distinct combinations recur across more than one weakness, covering
+1,039 of 1,237 entries) and `ModesOfIntroduction.Introduction` (deduped by
+`Phase` — only 16 distinct phases across 1,398 entries). `Likelihood`/`Note` on
+consequences and `Note` on introductions are per-weakness commentary, so they
+live on the edge.
 
-`WeaknessOrdinalities` doesn't get this treatment — its only real sub-field
-is `Ordinality` (Primary/Resultant/Indirect); the rare `Description`
-sibling (2% of entries) is dropped, and the field is flattened in place to
-a plain `WeaknessOrdinalities: ["Primary"]` array directly on the weakness
-record, no new node type.
+`WeaknessOrdinalities` doesn't get this treatment — its only real sub-field is
+`Ordinality` (Primary/Resultant/Indirect), the rare `Description` sibling (2% of
+entries) is dropped, and it flattens in place to a plain array on the weakness.
 
-Every sub-entity record gets a deterministic `<entity-type>--<uuid5>` id —
-seeded from its natural identity when one exists (so repeat references
-resolve to the same node), or from the owning weakness's id plus a
-position index when it doesn't (so it's still rerun-stable, just never
-reused). Reruns against the same input produce byte-identical output.
+Every sub-entity gets a deterministic `<entity-type>--<uuid5>` id, seeded from
+its natural identity where one exists (so repeat references resolve to the same
+node) or from the owning weakness plus a position index where it doesn't (still
+rerun-stable, just never reused).
 
 ## XHTML-shaped rich text is flattened to plain text, not extracted
 
-`weakness.ExtendedDescription`, `weakness.BackgroundDetails`, the
-`Description`/`EffectivenessNotes` sub-fields of `PotentialMitigations`/
-`DetectionMethods`, `AlternateTerms`' own `Description` (now an
-`alias_notes` entry rather than an edge attribute), and `view.Objective` aren't always a bare string — CWE's XML source wraps
-embedded markup (`<xhtml:p>`, `<xhtml:ul>`, nested `<xhtml:div>`) into a
-JSON shape keyed by tag name. This is formatting, not a graph relationship,
-so it's flattened to one plain-text string: paragraphs join with a blank
-line, list items (`ul`/`ol`, both wrapping an `li` list) render as
-`"- "`-prefixed lines (the ordered/unordered distinction isn't preserved —
-a cosmetic simplification; the underlying item order is), and the `style`
-attribute some `div` nodes carry (raw CSS, e.g. `"margin-left:1em;"`) is
-dropped as pure formatting noise with no content of its own. One caveat:
-the source JSON groups content by tag (all `p` paragraphs together, then
-all `ul` lists together) rather than preserving true document order across
-tag types, so a bullet list that originally appeared mid-paragraph in the
-CWE HTML source may render after all paragraphs instead — a pre-existing
-limitation of CWE's own XML-to-JSON conversion, not something introduced
-by this flattening pass.
+`ExtendedDescription`, `BackgroundDetails`, `view.Objective`, the
+`Description`/`EffectivenessNotes` sub-fields of
+`PotentialMitigations`/`DetectionMethods`, and `AlternateTerms`' own
+`Description` aren't always a bare string — CWE's XML wraps embedded markup
+(`<xhtml:p>`, `<xhtml:ul>`, nested `<xhtml:div>`) into a JSON shape keyed by tag
+name. That's formatting, not a relationship, so it flattens to one plain-text
+string: paragraphs join with a blank line, list items (`ul`/`ol`, both wrapping
+an `li` list) render as `"- "` lines (the ordered/unordered distinction isn't
+preserved — cosmetic; the item order is), and the raw-CSS `style` attribute some
+`div` nodes carry is dropped as formatting noise. One caveat: the source JSON
+groups content by tag (all `p`, then all `ul`) rather than preserving document
+order across tag types, so a list that appeared mid-paragraph in CWE's HTML may
+render after all paragraphs — a pre-existing limitation of CWE's own XML-to-JSON
+conversion, not of this pass.
 
-`weakness.AffectedResources`/`weakness.FunctionalAreas` (each wrapping a
-single-key list, `{"AffectedResource": [...]}` — a cardinality-1-collapse
-artifact of CWE's XML-to-JSON conversion, the same quirk `as_list()`
-already exists to normalize) are unwrapped to a plain
-`AffectedResources: [...]` / `FunctionalAreas: [...]` array.
-`view.Audience.Stakeholder` (a list of `{Type, Description}` pairs, only 10
-distinct `Type` values) is unwrapped the same way to a plain
-`Audience: [...]` array of stakeholder type names; the per-view
-`Description` text is dropped.
+`AffectedResources`/`FunctionalAreas` each wrap a single-key list
+(`{"AffectedResource": [...]}` — a cardinality-1-collapse artifact of that same
+conversion, the quirk `as_list()` exists to normalize) and are unwrapped to plain
+arrays. `view.Audience.Stakeholder` (a list of `{Type, Description}` pairs, only
+10 distinct `Type`s) is unwrapped the same way to an array of stakeholder types;
+the per-view `Description` is dropped.
 
 ## Output
 
@@ -196,31 +150,30 @@ Two JSON files, each a plain array of records.
 
 ### `entities.json` — 5,056 records
 
-Split by each record's own `type`. The first three are CWE's own object
-kinds; the rest are sub-records promoted out of `weakness` (see above):
+The first three are CWE's own object kinds; the rest are sub-records promoted
+out of `weakness`:
 
 | `type` | Count | Contents |
 |---|---|---|
-| `weakness` | 969 | CWE weaknesses — id, name, description, extended description, abstraction/structure/status, ordinalities (flat array), likelihood of exploit, background details, affected resources, functional areas, aliases + alias notes |
+| `platform` | 1,527 | Deduped `(category, name)` platforms plus private nodes for unnamed entries — id, category, name |
+| `mitigation` | 1,253 | 70 deduped by `Mitigation_ID` plus 1,183 private per-weakness nodes — id, mitigation_id (or the detail itself, when private) |
+| `weakness` | 969 | CWE weaknesses — id, name, description, extended description, abstraction/structure/status, ordinalities, likelihood of exploit, background details, affected resources, functional areas, aliases + alias notes |
+| `detection-method` | 499 | 23 deduped by `Detection_Method_ID` plus 476 private nodes — id, detection_method_id (or the detail, when private) |
 | `category` | 422 | Organizational groupings — id, name, summary |
-| `view` | 59 | Organizational groupings for browsing/filtering — id, name, objective, `view_type` (renamed from the source's `Type` to avoid colliding with the entity-kind `type`), audience (flat array of stakeholder types) |
-| `platform` | 1,527 | Deduped `(category, name)` platforms (plus private nodes for unnamed entries) — id, category, name |
-| `mitigation` | 1,253 | Deduped-by-`Mitigation_ID` mitigations (70) plus private per-weakness nodes for the rest (1,183) — id, mitigation_id |
-| `detection-method` | 499 | Deduped-by-`Detection_Method_ID` detection methods (23) plus private per-weakness nodes for the rest (476) — id, detection_method_id |
-| `consequence` | 311 | Deduped `(scope, impact)` pairs — id, scope (array), impact (array) |
+| `consequence` | 311 | Deduped `(scope, impact)` pairs — id, scope, impact |
+| `view` | 59 | Groupings for browsing/filtering — id, name, objective, `view_type`, audience |
 | `introduction` | 16 | Deduped introduction phases — id, phase |
 
 ### `relationships.json` — 18,339 records
 
-Every record is `type: "relationship"` with id, relationship_type,
-source_ref and target_ref. The 4,337 `related-to` edges are the ones
-pointing *outside* this bundle, and are the only ones carrying a
-`source_name`:
+Every record is `type: "relationship"` with id, relationship_type, source_ref
+and target_ref. The 4,337 `related-to` edges point *outside* this bundle and are
+the only ones carrying `source_name`:
 
 | `relationship_type` | Count | Endpoints |
 |---|---|---|
 | `has_member` | 5,024 | category/view → weakness |
-| `related-to` | 4,337 | weakness → CVE (3,125, `source_name: "cve"`, from `ObservedExamples`) or → CAPEC (1,212, `source_name: "capec"`, from `RelatedAttackPatterns`) |
+| `related-to` | 4,337 | weakness → CVE (3,125, from `ObservedExamples`) or → CAPEC (1,212, from `RelatedAttackPatterns`) |
 | `applies_to_platform` | 2,072 | weakness → platform |
 | `has_mitigation` | 1,710 | weakness → mitigation |
 | `introduced_in` | 1,398 | weakness → introduction |

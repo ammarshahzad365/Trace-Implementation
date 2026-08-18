@@ -1,25 +1,18 @@
 """Runs every data-preprocessing module in this repo, in order.
 
-Each module (CWE, CAPEC, CVE, mitre-attack, mitre-defend) is a fully
-independent script that reads its own domain's raw data from
-`data-acquisition/` and writes exactly two files into its own subfolder
-here -- `entities.json` and `relationships.json`, ten files in total across
-the five modules. Each record's own `type` field distinguishes the kinds
-inside those two files. This script doesn't import or share any state
-between the modules, it just runs each one's `main()` in a subprocess (via
-`sys.executable`, so it's the same interpreter/venv this script itself is
-run with) and reports a pass/fail summary at the end. Every module computes
-its own default `--input`/`--output-dir` from its own file location, so
-this works regardless of the current working directory.
-
-Usage:
+Each module (CWE, CAPEC, CVE, mitre-attack, mitre-defend) is a fully independent
+script that reads its own raw data from `data-acquisition/` and writes
+`entities.json` + `relationships.json` into its own subfolder here -- ten files
+across the five modules. No state is shared: this script just runs each module in
+a subprocess (via `sys.executable`, so the same interpreter/venv) and reports a
+pass/fail summary. Each module derives its own default `--input`/`--output-dir`
+from its file location, so the working directory doesn't matter.
 
     py main.py                              # run every module
     py main.py --only cwe capec             # run just these
     py main.py --skip mitre-defend          # run everything except this
 
-A module's own stdout/stderr streams straight through as it runs, so
-progress prints live, the same as running it directly. Exit code is 0 only
+A module's stdout/stderr streams straight through as it runs. Exit code is 0 only
 if every module that ran exited 0.
 """
 

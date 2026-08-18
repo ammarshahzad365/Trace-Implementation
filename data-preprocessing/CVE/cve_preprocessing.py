@@ -1,124 +1,36 @@
-"""CVE field-projection preprocessor.
+"""CVE field-projection preprocessor. Full rationale in README.md.
 
-Reads the raw STIX 2.1 bundles produced by the CVE crawler
-(`data-acquisition/CVE/records/<year>/latest.json`, one bundle per year) and
-writes exactly two flattened JSON files: `entities.json` (the
-vulnerabilities) and `relationships.json` (their CWE classifications).
-Unlike CWE/CAPEC, the CVE crawler shards its output by year rather than
-writing one combined `latest.json`, so this script reads every
-`records/<year>/latest.json` and combines them into a single pair of
-outputs.
+Reads the CVE crawler's per-year STIX 2.1 bundles
+(`data-acquisition/CVE/records/<year>/latest.json`) and combines them into two
+files: `entities.json` (the vulnerabilities) and `relationships.json` (their CWE
+classifications). Every object in these bundles is a STIX `vulnerability`, so
+this is the one source whose entity file holds a single kind.
 
-Every object in these bundles is a STIX `vulnerability` record built by
-`cve_to_stix()` in `data-acquisition/CVE/client.py`, so `entities.json` is
-uniformly `type: "vulnerability"` -- this is the one source in the project
-whose entity file holds a single kind.
+Records are keyed by their CVE id (`name`, e.g. `CVE-1999-0001`), the same
+convention CAPEC uses; the STIX id moves to `stix_id` and the now-redundant
+`name` is dropped. No edge ever referenced the STIX id, so this is a pure rename.
 
-## Id: the CVE name, not the STIX id
+Dropped entirely: `external_references` (a self-reference plus bibliographic
+advisory URLs -- none point at an entity in any bundle), `x_nvd_configurations`
+(CPE applicability -- a nested AND/OR tree over 3.1M `cpeMatch` entries, with no
+lossless flat edge to extract), and `Rejected` records (NVD leaves them as empty
+shells with no CVSS, CWEs or configurations).
 
-Vulnerability records are keyed by their CVE id (`name`, e.g.
-`"CVE-1999-0001"`) -- the same convention CAPEC uses for its own `CAPEC-N`
-ids -- not by the STIX `vulnerability--<uuid>` id the raw bundle assigns.
-The original STIX id is kept alongside as `stix_id`; the now-redundant
-`name` field itself is dropped (same call as CAPEC dropping its redundant
-`capec_id` once `id` became `CAPEC-N`). No relationship in this dataset
-ever referenced the STIX id in the first place -- the extracted edges
-already keyed off `name` -- so this is a pure rename, not a rewrite of any
-edge.
+`x_nvd_weaknesses` becomes `CVE-N --related-to--> CWE-N` edges, the reverse of
+CWE's own edges; NVD's fallback labels (`NVD-CWE-noinfo`/`-Other`) aren't catalog
+entries and are dropped.
 
-## Fields dropped entirely
-
-- `external_references`: its first entry is always a self-reference
-  (`source_name: "cve"`, `external_id` equal to the record's own `name`) and
-  the rest are bibliographic advisory/patch URLs whose `source_name` is the
-  submitting org, not a catalog id -- none of them point at another entity
-  in this or any other bundle, so the field is dropped entirely (the same
-  treatment CWE gives its own `References`/`Notes` fields).
-- `x_nvd_configurations` (CPE applicability data): dropped entirely. Unlike
-  every other relationship-shaped field in this project, it isn't a flat
-  edge list -- it's a nested AND/OR boolean tree over 3.1M `cpeMatch`
-  entries across 427K distinct CPE criteria strings -- so there is no
-  lossless flat (source_ref, target_ref) edge to extract, and it is out of
-  scope for this pass.
-- Records with `x_nvd_vuln_status == "Rejected"` are dropped outright: NVD
-  leaves these as empty shells (no CVSS, no CWEs, no configurations, and a
-  description of just `"Rejected reason: ..."`), so they carry no
-  vulnerability data worth preprocessing.
-
-`x_nvd_weaknesses` (the CVE's CWE classification) is extracted into
-`relationships.json` as `CVE-N --related-to--> CWE-N` edges, the
-reverse direction of CWE's own `CWE-N --related-to--> CVE-N` edges (from
-`RelatedWeaknesses`/`ObservedExamples` in `cwe_preprocessing.py`). Only real
-`CWE-N` ids are extracted; NVD-only fallback labels (`NVD-CWE-noinfo`,
-`NVD-CWE-Other`) aren't real catalog entries and are dropped, not extracted
-or kept as an attribute.
-
-## `x_nvd_cvss` is folded onto the vulnerability, not made into nodes
-
-`x_nvd_cvss` is a container keyed by up to five metric-version names
-(`cvssMetricV2`, `cvssMetricV30`, `cvssMetricV31`, `cvssMetricV40`,
-`ssvcV203`), each a *list* of scored assessments, each of which nests its
-own `cvssData`/`ssvcData` object one level deeper.
-
-An earlier pass unnested all five into their own entity records plus
-`has_cvss_v*_score` / `has_ssvc_assessment` edges. That cost one node and one
-edge per assessment -- 593,945 of each against 346,947 vulnerabilities, so
-severity was roughly two thirds of the loaded graph -- to model something the
-CVE -> CWE -> CAPEC -> ATT&CK -> D3FEND trace never traverses and that every
-query only ever reads as a filter or a sort key (`WHERE v.cvss_base_score >=
-9.0`). Deduplicating those nodes could not fix it: 82.7% of scored CVEs carry
-exactly one assessment, so the count is driven by there being a node class at
-all, not by redundancy within it.
-
-So the whole container is now flattened onto the vulnerability record itself
-as plain properties. Every field keeps a `cvss_` or `ssvc_` prefix naming the
-scoring system it came from, so which properties belong to which system stays
-readable on a record that also carries the CVE's own fields:
-
-    cvss_version, cvss_base_score, cvss_vector_string, cvss_source,
-    cvss_assessment_type, cvss_assessment_count
-    cvss_base_score_min, cvss_base_score_max        (only when disputed)
-    cvss_ac_insuf_info, cvss_obtain_all_privilege,  (only when v2 wins)
-    cvss_obtain_other_privilege, cvss_obtain_user_privilege,
-    cvss_user_interaction_required
-    ssvc_exploitation, ssvc_automatable, ssvc_technical_impact
-
-`cvss_*` and `ssvc_*` are both absent entirely on a CVE that was never scored
-by that system, rather than present-and-null.
-
-### Which assessment wins
-
-A CVE can carry up to four assessments of the same metric version (NVD's own
-`Primary` alongside several CNA `Secondary` scores) across up to four metric
-versions. `select_cvss` ranks them by `CVSS_VERSION_PRECEDENCE` (4.0 > 3.1 >
-3.0 > 2.0 -- the newer standard wins, and v2 has been deprecated since 2019),
-then `Primary` over `Secondary`, then higher `base_score`, then earliest
-position in the raw input. That ordering is total and reads only the record's
-own fields, so reruns against the same input produce byte-identical output.
-
-### Disagreement is summarised, not discarded
-
-Picking one winner would otherwise silently drop the fact that NVD and a CNA
-disagree, which is true of a sixth of scored CVEs. `cvss_assessment_count`
-counts the *distinct* claims -- `(version, vector_string, base_score)` triples
--- made about this CVE, so a `Secondary` that merely echoes a `Primary`
-counts once rather than twice, and `cvss_base_score_min`/`cvss_base_score_max`
-bracket the spread whenever that count exceeds one.
-
-Both are computed only over assessments sharing the winner's major version
-(`CVSS_METRIC_CONFIG`'s family), because a v2 score and a v3 score of the same
-CVE are readings on different scales -- their difference is a change of
-standard, not a disagreement between assessors.
-
-### SSVC
-
-`ssvcV203` is CISA's Stakeholder-Specific Vulnerability Categorization, a
-decision-tree triage rather than a numeric score. Only its three decision
-points (`exploitation`, `automatable`, `technicalImpact`, nested one level
-further inside `ssvcData.options[]` as a list of single-key objects) are
-folded on; the assessment's `source`, `role`, `version` and `timestamp` are
-dropped as scoring-process metadata. Where a CVE carries more than one SSVC
-assessment (145 of them do), the newest by `timestamp` wins.
+`x_nvd_cvss` is folded onto the vulnerability as `cvss_`/`ssvc_`-prefixed
+properties rather than becoming nodes: an earlier pass cost one node and one edge
+per assessment (593,945 of each) to model something the CVE -> ... -> D3FEND
+trace never traverses and queries only ever read as a filter or sort key.
+`cvss_rank` picks a winner by version precedence (4.0 > 3.1 > 3.0 > 2.0), then
+`Primary` over `Secondary`, then base score, then input position -- a total order
+over the record's own fields, so reruns are byte-identical. Disagreement isn't
+discarded: `cvss_assessment_count` counts distinct `(version, vector, score)`
+claims within the winner's major version, and `cvss_base_score_min`/`_max` bracket
+the spread when that exceeds one. SSVC contributes only its three decision points,
+from the newest assessment by timestamp.
 """
 
 from __future__ import annotations
@@ -149,7 +61,7 @@ REAL_CWE_PREFIX = "CWE-"
 
 EXTERNAL_RELATIONSHIP_KEY = "external-relationship"
 
-# CVSS v4.0 environmental-override fields: verified NOT_DEFINED on every v4.0 entry in this
+# CVSS v4.0 environmental overrides: verified NOT_DEFINED on every v4.0 entry in this
 # dataset (NVD never customizes them), so they're dropped as pure boilerplate.
 CVSS_V4_ENVIRONMENTAL_FIELDS: Tuple[str, ...] = (
     "confidentialityRequirement",
@@ -168,22 +80,12 @@ CVSS_V4_ENVIRONMENTAL_FIELDS: Tuple[str, ...] = (
     "modifiedSubAvailabilityImpact",
 )
 
-# Fields that are a lossless restatement of something else on the same record, so
-# keeping them stores the same fact twice:
-#
-#   - every enum metric is spelled out in `vectorString` (`AV:N/AC:L/...`);
-#   - `baseSeverity` is a fixed band table over `baseScore`;
-#   - `exploitabilityScore`/`impactScore` are the published CVSS formulas over the
-#     vector's own metrics.
-#
-# Verified before removal by reconstructing all three from `vectorString`/`baseScore`
-# alone and diffing against NVD's own values: 0 mismatches on all 194,545 v2, 359,055
-# v3 and 29,426 v4 records. For v4 the supplemental metrics are included too -- CVSS
-# v4.0 omits a supplemental metric from the vector exactly when it is `NOT_DEFINED`,
-# which is what 97%+ of them are.
-#
-# What is NOT dropped: v2's five NVD-specific booleans (see CVSS_V2_KEPT_FIELDS) have
-# no vector representation and are genuinely independent data.
+# Fields that restate something else on the same record: every enum metric is spelled out
+# in `vectorString`, `baseSeverity` is a band table over `baseScore`, and
+# `exploitabilityScore`/`impactScore` are published formulas over the vector's metrics.
+# Verified by reconstructing all three from `vectorString`/`baseScore` alone -- 0
+# mismatches across 194,545 v2, 359,055 v3 and 29,426 v4 records. (v2's five NVD-specific
+# booleans have no vector representation, so they are kept -- see CVSS_V2_KEPT_FIELDS.)
 CVSS_V2_DERIVED_FIELDS: Tuple[str, ...] = (
     "baseSeverity",
     "exploitabilityScore",
@@ -233,8 +135,8 @@ CVSS_V4_DERIVED_FIELDS: Tuple[str, ...] = (
 )
 
 # raw x_nvd_cvss key -> (major-version family, fields to drop after flattening). The
-# family is what disagreement is measured within: v3.0 and v3.1 are the same scale
-# read slightly differently, whereas v2 and v3 are different scales entirely.
+# family bounds what disagreement is measured within: v3.0 and v3.1 read the same scale
+# slightly differently, whereas v2 and v3 are different scales entirely.
 CVSS_METRIC_CONFIG: Dict[str, Tuple[str, Tuple[str, ...]]] = {
     "cvssMetricV2": ("v2", CVSS_V2_DERIVED_FIELDS),
     "cvssMetricV30": ("v3", CVSS_V3_DERIVED_FIELDS),
@@ -247,22 +149,15 @@ CVSS_VERSION_PRECEDENCE: Dict[str, int] = {"4.0": 4, "3.1": 3, "3.0": 2, "2.0": 
 
 PRIMARY_ASSESSMENT = "Primary"
 
-# What a CVSS record asserts about the vulnerability, independent of who asserted it.
-# Two assessments agreeing on all three say the same thing; the difference is only
-# whose name is on it.
+# What an assessment asserts, independent of who asserted it -- two agreeing on all three
+# say the same thing, only the name on it differs.
 CVSS_CLAIM_FIELDS: Tuple[str, ...] = ("version", "vector_string", "base_score")
 
 # Carried onto the vulnerability from the winning assessment, `cvss_`-prefixed.
-CVSS_KEPT_FIELDS: Tuple[str, ...] = (
-    "version",
-    "base_score",
-    "vector_string",
-    "source",
-    "assessment_type",
-)
+CVSS_KEPT_FIELDS: Tuple[str, ...] = ("version", "base_score", "vector_string", "source", "assessment_type")
 
-# v2-only NVD additions with no representation in the vector string, so unlike the
-# enum metrics they can't be recomputed and are kept when a v2 assessment wins.
+# v2-only NVD additions absent from the vector string, so unlike the enum metrics they
+# can't be recomputed and are kept when a v2 assessment wins.
 CVSS_V2_KEPT_FIELDS: Tuple[str, ...] = (
     "ac_insuf_info",
     "obtain_all_privilege",
@@ -276,17 +171,15 @@ CVSS_PREFIX = "cvss_"
 SSVC_METRIC_KEY = "ssvcV203"
 SSVC_PREFIX = "ssvc_"
 
-# SSVC's three decision points. Everything else on the assessment (`source`, `role`,
-# `version`, `timestamp`) is scoring-process metadata, not a fact about the CVE.
+# SSVC's three decision points. The rest of the assessment (`source`, `role`, `version`,
+# `timestamp`) is scoring-process metadata, not a fact about the CVE.
 SSVC_KEPT_FIELDS: Tuple[str, ...] = ("exploitation", "automatable", "technical_impact")
 
 ENTITIES_FILENAME = "entities.json"
 RELATIONSHIPS_FILENAME = "relationships.json"
 
-# Which `parse()` result keys hold edges; every other key holds entities. The keys
-# themselves stay per-kind so the run summary can still report a breakdown, but they
-# no longer map to a file each -- output is exactly two files, and a record's own
-# `type` field is what distinguishes the kinds inside them.
+# Which `parse()` result keys hold edges; the rest hold entities. Keys stay per-kind so
+# the run summary can report a breakdown, but they no longer map to a file each.
 RELATIONSHIP_KEYS: Tuple[str, ...] = (EXTERNAL_RELATIONSHIP_KEY,)
 
 
@@ -327,28 +220,22 @@ def make_relationship(source_ref: str, target_ref: str, relationship_type: str, 
 
 def build_vulnerability_record(obj: Dict[str, Any], cve_id: str) -> Dict[str, Any]:
     record: Dict[str, Any] = {"id": cve_id, "stix_id": obj["id"]}
-    for field in VULNERABILITY_FIELDS:
-        if field in obj:
-            record[field] = obj[field]
+    record.update({field: obj[field] for field in VULNERABILITY_FIELDS if field in obj})
     return record
 
 
 def build_weakness_relationships(obj: Dict[str, Any], cve_id: str) -> List[Dict[str, Any]]:
-    relationships = []
-    for weakness in obj.get("x_nvd_weaknesses", []):
-        if not str(weakness).startswith(REAL_CWE_PREFIX):
-            continue
-        relationships.append(
-            make_relationship(cve_id, weakness, EXTERNAL_RELATIONSHIP_TYPE, source_name=EXTERNAL_RELATIONSHIP_SOURCE_NAME)
-        )
-    return relationships
+    return [
+        make_relationship(cve_id, weakness, EXTERNAL_RELATIONSHIP_TYPE, source_name=EXTERNAL_RELATIONSHIP_SOURCE_NAME)
+        for weakness in obj.get("x_nvd_weaknesses", [])
+        if str(weakness).startswith(REAL_CWE_PREFIX)
+    ]
 
 
 def snake_case(name: str) -> str:
-    """NVD's CVSS/SSVC field names are camelCase (`baseScore`, `vectorString`) with a
-    few PascalCase supplemental metrics (`Automatable`, `Safety`); every other source
-    in this project emits snake_case, so these are normalized to match. Verified after
-    every run that no two source names collapse onto the same snake_case name."""
+    """NVD's CVSS/SSVC names are camelCase (`baseScore`) with a few PascalCase
+    supplemental metrics (`Automatable`); every other source here emits snake_case.
+    Verified that no two source names collapse onto the same snake_case name."""
     return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
 
 
@@ -357,27 +244,21 @@ def normalize_keys(flat: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def flatten_cvss_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge a cvssMetricV*[] entry's own fields with its nested cvssData fields into one
-    flat dict. `type` (Primary/Secondary) is renamed `assessment_type` so it doesn't
-    collide with the vulnerability record's own `type` discriminator once folded on."""
+    """Merge a cvssMetricV*[] entry with its nested cvssData into one flat dict. `type`
+    (Primary/Secondary) becomes `assessment_type` so it can't collide with the
+    vulnerability's own `type` discriminator once folded on."""
     flat: Dict[str, Any] = {}
     for key, value in entry.items():
-        if key == "cvssData":
-            continue
-        flat["assessment_type" if key == "type" else key] = value
-    for key, value in (entry.get("cvssData") or {}).items():
-        flat[key] = value
+        if key != "cvssData":
+            flat["assessment_type" if key == "type" else key] = value
+    flat.update(entry.get("cvssData") or {})
     return normalize_keys(flat)
 
 
 def flatten_ssvc_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge a ssvcV203[] entry's own fields with its nested ssvcData fields (and that
-    field's own options[] list of single-key decision points) into one flat dict."""
-    flat: Dict[str, Any] = {}
-    for key, value in entry.items():
-        if key == "ssvcData":
-            continue
-        flat[key] = value
+    """Merge a ssvcV203[] entry with its nested ssvcData (and that field's own options[]
+    list of single-key decision points) into one flat dict."""
+    flat: Dict[str, Any] = {key: value for key, value in entry.items() if key != "ssvcData"}
     for key, value in (entry.get("ssvcData") or {}).items():
         if key == "id":
             continue
@@ -390,9 +271,9 @@ def flatten_ssvc_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def flatten_all_cvss_entries(cvss: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
-    """Flatten every cvssMetricV*[] entry on one CVE, dropping the derived fields, and
-    tag each with its major-version family. Returned in `CVSS_METRIC_CONFIG` order,
-    which is fixed, so the selection below breaks ties the same way on every run."""
+    """Flatten every cvssMetricV*[] entry on one CVE, dropping the derived fields and
+    tagging each with its major-version family. Returned in `CVSS_METRIC_CONFIG` order,
+    which is fixed, so ties below break the same way on every run."""
     flattened: List[Tuple[str, Dict[str, Any]]] = []
     for metric_key, (family, drop_fields) in CVSS_METRIC_CONFIG.items():
         for entry in cvss.get(metric_key) or []:
@@ -404,9 +285,9 @@ def flatten_all_cvss_entries(cvss: Dict[str, Any]) -> List[Tuple[str, Dict[str, 
 
 
 def cvss_rank(candidate: Tuple[str, Dict[str, Any]]) -> Tuple[int, int, float]:
-    """Newer standard first, then NVD's own Primary over a CNA's Secondary, then the
-    higher base score. `max()` keeps the first of equal ranks, so a full tie resolves
-    to the earliest position in the raw input."""
+    """Newer standard first, then NVD's Primary over a CNA's Secondary, then the higher
+    base score. `max()` keeps the first of equal ranks, so a full tie resolves to the
+    earliest position in the raw input."""
     _, flat = candidate
     base_score = flat.get("base_score")
     return (
@@ -416,27 +297,19 @@ def cvss_rank(candidate: Tuple[str, Dict[str, Any]]) -> Tuple[int, int, float]:
     )
 
 
-def cvss_claim(flat: Dict[str, Any]) -> Tuple[Any, ...]:
-    """What this assessment says about the vulnerability, with the assessor's identity
-    removed -- so a Secondary echoing a Primary is one claim, not two."""
-    return tuple(flat.get(field) for field in CVSS_CLAIM_FIELDS)
-
-
 def fold_cvss(cvss: Dict[str, Any]) -> Dict[str, Any]:
-    """Collapse every CVSS assessment on one CVE into a flat set of `cvss_`-prefixed
-    properties: the winning assessment's own fields, plus a summary of how much the
-    assessments of that same major version disagreed."""
+    """Collapse every CVSS assessment on one CVE into flat `cvss_`-prefixed properties:
+    the winner's own fields, plus a summary of how much the assessments of that same
+    major version disagreed."""
     candidates = flatten_all_cvss_entries(cvss)
     if not candidates:
         return {}
 
     winner_family, winner = max(candidates, key=cvss_rank)
     family = [flat for family_name, flat in candidates if family_name == winner_family]
-    claims = {cvss_claim(flat) for flat in family}
+    claims = {tuple(flat.get(field) for field in CVSS_CLAIM_FIELDS) for flat in family}
 
-    folded = {
-        f"{CVSS_PREFIX}{field}": winner[field] for field in CVSS_KEPT_FIELDS if field in winner
-    }
+    folded = {f"{CVSS_PREFIX}{field}": winner[field] for field in CVSS_KEPT_FIELDS if field in winner}
     folded[f"{CVSS_PREFIX}assessment_count"] = len(claims)
 
     if len(claims) > 1:
@@ -446,9 +319,7 @@ def fold_cvss(cvss: Dict[str, Any]) -> Dict[str, Any]:
             folded[f"{CVSS_PREFIX}base_score_max"] = max(scores)
 
     if winner_family == "v2":
-        folded.update(
-            {f"{CVSS_PREFIX}{field}": winner[field] for field in CVSS_V2_KEPT_FIELDS if field in winner}
-        )
+        folded.update({f"{CVSS_PREFIX}{field}": winner[field] for field in CVSS_V2_KEPT_FIELDS if field in winner})
     return folded
 
 
@@ -464,10 +335,7 @@ def fold_ssvc(cvss: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    result: Dict[str, List[Dict[str, Any]]] = {
-        "vulnerability": [],
-        EXTERNAL_RELATIONSHIP_KEY: [],
-    }
+    result: Dict[str, List[Dict[str, Any]]] = {"vulnerability": [], EXTERNAL_RELATIONSHIP_KEY: []}
 
     dropped_counts: Dict[str, int] = {}
     folded_counts = {"with a CVSS score": 0, "with an SSVC assessment": 0, "with disputed CVSS scores": 0}
@@ -481,7 +349,8 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
 
         vuln_status = str(obj.get("x_nvd_vuln_status") or "")
         if vuln_status in DROPPED_VULN_STATUSES:
-            dropped_counts[f"vuln_status={vuln_status}"] = dropped_counts.get(f"vuln_status={vuln_status}", 0) + 1
+            reason = f"vuln_status={vuln_status}"
+            dropped_counts[reason] = dropped_counts.get(reason, 0) + 1
             continue
 
         cve_id = str(obj.get("name") or "")
@@ -509,59 +378,41 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     return result
 
 
-def write_json(path: Path, records: List[Dict[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(records, handle, indent=2)
-        handle.write("\n")
-
-
 def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> Dict[str, int]:
     """Write every entity record to entities.json and every edge to relationships.json,
     concatenated in `result`'s own insertion order so reruns are byte-stable."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    entities: List[Dict[str, Any]] = []
-    relationships: List[Dict[str, Any]] = []
+    files: Dict[str, List[Dict[str, Any]]] = {ENTITIES_FILENAME: [], RELATIONSHIPS_FILENAME: []}
     for key, records in result.items():
-        (relationships if key in RELATIONSHIP_KEYS else entities).extend(records)
-    write_json(output_dir / ENTITIES_FILENAME, entities)
-    write_json(output_dir / RELATIONSHIPS_FILENAME, relationships)
+        files[RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME].extend(records)
+    for filename, records in files.items():
+        with (output_dir / filename).open("w", encoding="utf-8") as handle:
+            json.dump(records, handle, indent=2)
+            handle.write("\n")
     return {key: len(records) for key, records in result.items()}
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     script_dir = Path(__file__).resolve().parent
     default_input = script_dir.parent.parent / "data-acquisition" / "CVE" / "records"
-    default_output_dir = script_dir
 
     parser = argparse.ArgumentParser(description="Trim CVE's per-year STIX bundles down to a fixed field whitelist")
-    parser.add_argument(
-        "--input",
-        default=str(default_input),
-        help=f"Path to the CVE crawler's records directory (default: {default_input})",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default=str(default_output_dir),
-        help=f"Directory to write entities.json / relationships.json (default: {default_output_dir})",
-    )
+    parser.add_argument("--input", default=str(default_input), help=f"Path to the CVE crawler's records directory (default: {default_input})")
+    parser.add_argument("--output-dir", default=str(script_dir), help=f"Directory to write entities.json / relationships.json (default: {script_dir})")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    input_dir = Path(args.input)
     output_dir = Path(args.output_dir)
 
     try:
-        objects = load_objects(input_dir)
-        result = parse(objects)
+        result = parse(load_objects(Path(args.input)))
         counts = write_outputs(result, output_dir)
         print(
-            f"[cve-parser] wrote {counts['vulnerability']} entities to {ENTITIES_FILENAME} "
-            f"(all vulnerabilities) and "
-            f"{counts[EXTERNAL_RELATIONSHIP_KEY]} relationships to {RELATIONSHIPS_FILENAME} "
-            f"(all external, to CWE), "
-            f"in {output_dir}"
+            f"[cve-parser] wrote {counts['vulnerability']} vulnerabilities to {ENTITIES_FILENAME} "
+            f"and {counts[EXTERNAL_RELATIONSHIP_KEY]} relationships (all external, to CWE) "
+            f"to {RELATIONSHIPS_FILENAME}, in {output_dir}"
         )
         return 0
     except (ParseError, OSError, json.JSONDecodeError) as exc:

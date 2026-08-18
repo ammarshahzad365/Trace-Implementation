@@ -1,11 +1,10 @@
 # MITRE ATT&CK Preprocessing
 
 Merges the three raw STIX 2.1 bundles from the ATT&CK crawler
-(`data-acquisition/mitre-attack/{enterprise,mobile,ics}/latest.json`) into
-one deduplicated pair of trimmed files — `entities.json` and
-`relationships.json`, with each record's own `type` field distinguishing
-the fourteen entity kinds inside the first — splitting every embedded
-id-list field out into explicit relationship records.
+(`data-acquisition/mitre-attack/{enterprise,mobile,ics}/latest.json`) into one
+deduplicated pair of trimmed files — `entities.json` and `relationships.json` —
+with each record's own `type` distinguishing the fourteen entity kinds, and every
+embedded id-list field split out into explicit edges.
 
 ## Usage
 
@@ -13,232 +12,168 @@ id-list field out into explicit relationship records.
 py mitre_attack_preprocessing.py
 ```
 
-Optional flags: `--input` (path to the ATT&CK crawler's workspace directory,
-containing `enterprise/`/`mobile/`/`ics/` subfolders — default: the ATT&CK
-crawler's own output) and `--output-dir` (default: this folder).
+Optional flags: `--input` (the ATT&CK crawler's workspace, containing
+`enterprise/`/`mobile/`/`ics/` — default: the crawler's own output) and
+`--output-dir` (default: this folder).
 
 ## Why one merged output instead of three parallel ones
 
-Unlike CWE/CAPEC/CVE, ATT&CK ships as three domain bundles that legitimately
-share entities: a threat group, piece of malware, campaign, or data
-component tracked across multiple matrices keeps the *same* STIX id in
-every domain bundle it appears in (each copy carries its own
-`x_mitre_domains` list, e.g. `["enterprise-attack", "ics-attack"]`).
-Techniques, analytics, detection strategies, tools, tactics, mitigations,
-and matrices never repeat an id across domains — each domain has its own
-distinct set. Given that split, this script merges all three domains into
-one deduplicated object set keyed by STIX id, rather than writing three
-parallel per-domain folders that would triple-store every shared threat
-group. For ids that appear in more than one domain bundle (checked
-directly — differences were found in `x_mitre_domains` only), the
-`x_mitre_domains` lists are unioned and every other field is taken from
-whichever copy has the later `modified` timestamp.
+Unlike CWE/CAPEC/CVE, ATT&CK ships three domain bundles that legitimately share
+entities: a group, malware, campaign or data component tracked across matrices
+keeps the *same* STIX id in every bundle it appears in, each copy carrying its
+own `x_mitre_domains`. Techniques, analytics, detection strategies, tools,
+tactics, mitigations and matrices never repeat an id across domains. So this
+script merges all three into one object set keyed by STIX id, rather than writing
+three per-domain folders that would triple-store every shared group. For ids
+appearing in more than one bundle (checked directly — differences were found in
+`x_mitre_domains` only), the domain lists are unioned and every other field taken
+from whichever copy has the later `modified` timestamp.
 
-## Ids: every entity's own `id` is its human-readable ATT&CK id, not its STIX id
+## Ids are the human-readable ATT&CK id, not the STIX id
 
-Unlike this project's other four sources — whose preprocessors all key
-entities by a human-readable id (`CAPEC-N`, `CVE-N`, `CWE-N`) — this script
-used to leave `id` as the raw STIX `<type>--<uuid>` and carry the
-human-readable code in a separate `attack_id` attribute instead. That's now
-fixed: `id` is the ATT&CK id (`T1055`, `T1003.008` for a sub-technique,
-`S0002`, `G0016`, `M1013`, `C0028`, `TA0009`, `DS0026`, `DET0210`, `AN0001`,
-`DC0103`, `A0008`, or a matrix's own domain string,
-`enterprise-attack`/`mobile-attack`/`ics-attack`) wherever one exists,
-extracted from `external_references`' `mitre-attack` entry (or, on a
-handful of legacy revoked/deprecated records, `mitre-ics-attack`/
-`mitre-mobile-attack`). The original STIX id is kept alongside as `stix_id`
-on every record — the same convention CAPEC/CVE use for their own `stix_id`.
+Like this project's other four sources, entities are keyed by a human-readable id
+(`T1055`, `T1003.008`, `S0002`, `G0016`, `M1013`, `C0028`, `TA0009`, `DS0026`,
+`DET0210`, `AN0001`, `DC0103`, `A0008`, or a matrix's own domain string),
+extracted from `external_references`' `mitre-attack` entry — or, on a few legacy
+revoked/deprecated records, `mitre-ics-attack`/`mitre-mobile-attack`. The STIX id
+is kept as `stix_id`, the same convention CAPEC/CVE use. An entity with no such
+reference keeps its STIX id as `id`: a defensive fallback, not exercised by any
+record in this dataset.
 
-An entity with no `external_references` entry to extract an id from at all
-simply keeps its STIX id as `id` instead — a defensive fallback, not
-currently exercised by any record in this dataset (verified: every
-`attack-pattern`/`malware` object in the current bundles has one).
+An ATT&CK id is only unique **within its own object type** upstream. 226 ids are
+each claimed by more than one object: 224 deprecated pre-2019 `course-of-action`
+records reuse the `T####` of the technique they mitigate (mitigations only got
+`M####` numbering later), plus one straight duplicate each in `malware` (`S0017`:
+active *BISCUIT* vs. deprecated *EKANS*) and `x-mitre-matrix` (`mobile-attack`:
+active *Mobile ATT&CK* vs. its deprecated predecessor *Network-Based Effects*).
+These are resolved by **deleting the losing side** rather than keeping it under a
+fallback id:
 
-An ATT&CK id is only unique **within its own object type** upstream, not
-globally — 226 ids are each claimed by more than one object in the merged
-set: 224 deprecated pre-2019 `course-of-action` records reuse the `T####`
-id of the technique they mitigate (mitigations only got their own `M####`
-numbering later), plus one straight duplicate each in `malware` (`S0017`:
-active `BISCUIT` vs. deprecated `EKANS`) and `x-mitre-matrix`
-(`mobile-attack`: active "Mobile ATT&CK" vs. its deprecated predecessor
-"Network-Based Effects"). These are resolved by **deleting the losing
-side** rather than keeping it under a fallback id:
-
-- For a technique/mitigation collision, the technique always wins and the
-  mitigation is dropped — the id originally belonged to the technique, and
-  some of these techniques, though later revoked in favor of a
-  subtechnique, are the *only* source of a CAPEC cross-reference this
-  project has for them (all 36 CAPEC cross-reference edges come
-  from exactly this bucket) — keeping a revoked technique beats deleting
-  the one link to CAPEC it carries.
-- For the two same-type collisions (`malware`, `x-mitre-matrix`), whichever
-  side is active (`x_mitre_deprecated`/`revoked` both false/absent) wins.
-- A collision matching neither rule (no clear winner) drops every member
-  and logs a warning — not currently hit by any ATT&CK release, but a safe
-  default if a future one produces one.
+- Technique/mitigation collision → the technique wins. The id originally belonged
+  to it, and some of these techniques, though later revoked in favour of a
+  sub-technique, are this project's *only* source of a CAPEC cross-reference (all
+  36 such edges come from exactly this bucket).
+- The two same-type collisions → whichever side is active
+  (`x_mitre_deprecated`/`revoked` both false/absent).
+- No clear winner → drop every member and log a warning. Not hit by any ATT&CK
+  release so far, but a safe default.
 
 226 objects are dropped this way (224 `course-of-action`, 1 `malware`, 1
-`x-mitre-matrix`) — 0 `attack-pattern` records. Any relationship that pointed at a dropped object is dropped along with
-it. Verified after every run: every remaining entity id is globally unique,
-and every relationship endpoint (native, derived, and external) resolves.
+`x-mitre-matrix`) and 0 `attack-pattern`; any edge pointing at a dropped object
+goes with it. Verified after every run: every remaining id is globally unique and
+every endpoint resolves.
 
 ## What it does
 
-- Drops `identity`, `marking-definition`, and `x-mitre-collection` objects
-  entirely — pure STIX attribution/collection-manifest boilerplate, the
-  same treatment CAPEC gives `identity`/`marking-definition`.
-- Keeps every other object type, each reduced to a whitelist of fields (see
-  `mitre_attack_preprocessing.py`'s `*_FIELDS` constants for the exact
-  list per type).
-- The output `type` field renames STIX's own `attack-pattern` →
-  `attack-technique` and `course-of-action` → `attack-mitigation`
-  (the STIX type
-  is unchanged everywhere else it appears, e.g. `kill_chain_phases`
-  matching below, and CAPEC's own `attack-pattern`/`course-of-action`
-  records are untouched). CAPEC reuses those same two STIX types for its
-  own, unrelated attack patterns/mitigations — left as-is, this pair would
-  be the only `type` value shared by two different catalogs in the
-  whole project (every other type is already unique across all five
-  sources), which would merge two catalogs' worth of distinct entities
-  under one Neo4j label.
-- `external_references` is never kept verbatim, beyond the id extraction
-  described above, on any type:
-  - its `capec` entries become `T#### --related-to--> CAPEC-N` records
-    carrying `source_name: "capec"`, which is what marks them as pointing
-    outside this catalog — the reverse
-    direction of CAPEC's own `CAPEC-N --related-to--> T####` edges.
-  - every other entry is a bibliographic citation with no local entity to
-    point at, and is dropped along with the field itself — same treatment
-    CWE gives `References`/`Notes`. `campaign.x_mitre_first_seen_citation`/
-    `x_mitre_last_seen_citation` are dropped for the same reason (they only
-    made sense paired with a citation), even though `first_seen`/
-    `last_seen` themselves are kept.
-- Objects are kept even when `revoked`/`x_mitre_deprecated` is `true`
-  (unlike CVE's dropped `Rejected` records, and unlike the 226
-  collision-losing objects above, which are dropped specifically because
-  they're a duplicate id, not because they're revoked) — both flags are
-  kept as attributes instead, since ATT&CK's own `revoked-by` relationships
-  point *at* revoked objects, and dropping them would leave those edges
-  dangling.
+- Drops `identity`, `marking-definition` and `x-mitre-collection` — STIX
+  attribution/collection-manifest boilerplate.
+- Keeps every other type, reduced to a whitelist (`*_FIELDS` in the script).
+- The output `type` renames STIX's `attack-pattern` → `attack-technique` and
+  `course-of-action` → `attack-mitigation` (the STIX type is unchanged everywhere
+  else it appears, e.g. `kill_chain_phases` matching, and CAPEC's own records are
+  untouched). CAPEC reuses those two STIX types for its own unrelated attack
+  patterns and mitigations; left as-is they'd be the only `type` values shared by
+  two catalogs in the whole project, merging two catalogs' distinct entities under
+  one Neo4j label.
+- `external_references` is never kept verbatim beyond that id extraction: `capec`
+  entries become `T#### --related-to--> CAPEC-N` edges carrying
+  `source_name: "capec"` (the reverse of CAPEC's own), and every other entry is a
+  bibliographic citation with no local entity, dropped with the field — the same
+  treatment CWE gives `References`/`Notes`.
+  `campaign.x_mitre_first_seen_citation`/`x_mitre_last_seen_citation` go for the
+  same reason, though `first_seen`/`last_seen` are kept.
+- `revoked`/`x_mitre_deprecated` objects are **kept** (unlike CVE's `Rejected`
+  records, and unlike the 226 collision-losers, which are dropped for being a
+  duplicate id, not for being revoked): both flags become attributes instead,
+  since ATT&CK's own `revoked-by` edges point *at* revoked objects and dropping
+  them would leave those edges dangling.
 - `malware`/`tool` spell their alias list `x_mitre_aliases` where
-  `intrusion-set`/`campaign` use STIX's own `aliases`; the output unifies both
-  on `aliases`, which is also what CWE/CAPEC/D3FEND records call this concept
-  (the project previously had four different spellings for it).
-- `x_mitre_contributors` (write-up credit lists), `x_mitre_version`
-  (ATT&CK's internal revision counter), a tactic's `x_mitre_shortname`
-  (a slug of its own `name`, only ever needed internally to match
-  `kill_chain_phases`, which is now done before this id-based output is
-  written), and `x-mitre-asset.x_mitre_related_assets` (free-text
-  device-type references — see below) are dropped entirely as bookkeeping
-  with no graph value.
-- The following embedded id-list fields are removed from their entity
-  record and rebuilt as relationships instead, using each endpoint's own
-  (resolved) `id` as `source_ref`/`target_ref` — the same convention CAPEC
-  uses for its own derived edges:
-  - `attack-pattern.kill_chain_phases` → `has_tactic` edges. ATT&CK has no `relationship` object for
-    technique-to-tactic membership at all — it's a string match between
-    `kill_chain_phases[].phase_name` and `x-mitre-tactic.x_mitre_shortname`,
-    scoped to the domain implied by `kill_chain_phases[].kill_chain_name`
-    (`mitre-attack` → `enterprise-attack`, `mitre-mobile-attack` →
-    `mobile-attack`, `mitre-ics-attack` → `ics-attack`). Tactic shortnames
-    are unique within every domain, so this match is unambiguous.
-  - `x-mitre-matrix.tactic_refs` → `has_member` edges (matrix → tactic) — mirrors the `has_member` edges
-    CWE derives from its own `Relationships.HasMember`/`Members.HasMember`.
-  - `x-mitre-detection-strategy.x_mitre_analytic_refs` → `has_analytic`
-    edges (detection-strategy → analytic).
+  `intrusion-set`/`campaign` use STIX's `aliases`; output unifies both on
+  `aliases`, also what CWE/CAPEC/D3FEND call it.
+- Dropped as bookkeeping with no graph value: `x_mitre_contributors` (write-up
+  credits), `x_mitre_version` (internal revision counter), a tactic's
+  `x_mitre_shortname` (a slug of its own `name`, needed only to match
+  `kill_chain_phases`, done before output), and
+  `x-mitre-asset.x_mitre_related_assets` (see below).
+- These embedded id-list fields are removed and rebuilt as edges, using each
+  endpoint's resolved `id`:
+  - `attack-pattern.kill_chain_phases` → `has_tactic`. ATT&CK has no
+    `relationship` object for technique-to-tactic membership at all — it's a
+    string match between `phase_name` and `x-mitre-tactic.x_mitre_shortname`,
+    scoped to the domain implied by `kill_chain_name`. Tactic shortnames are
+    unique within a domain, so the match is unambiguous.
+  - `x-mitre-matrix.tactic_refs` → `has_member` (matrix → tactic), mirroring the
+    `has_member` edges CWE derives from its own `HasMember` fields.
+  - `x-mitre-detection-strategy.x_mitre_analytic_refs` → `has_analytic`.
   - `x-mitre-analytic.x_mitre_log_source_references[].x_mitre_data_component_ref`
-    → `uses_data_component` edges (analytic
-    → data-component), with the log source kept as an edge attribute
-    (`log_source_ref`, a `log-source` entity id) alongside `channel`.
-  - `x-mitre-data-component.x_mitre_log_sources[].name` → `has_log_source`
-    edges (data-component →
-    log-source), with `channel` as an edge attribute — see the nesting
-    section below.
+    → `uses_data_component`, with the log source as an edge attribute
+    (`log_source_ref`) alongside `channel`.
+  - `x-mitre-data-component.x_mitre_log_sources[].name` → `has_log_source`, with
+    `channel` as an edge attribute — see below.
 - `x-mitre-data-source` is kept as a plain entity list with no edges to
-  `x-mitre-data-component` — a from-scratch grep of the source data found
-  zero `data_source_ref` occurrences anywhere, so the two types have no
-  formal link left in this ATT&CK release; `x-mitre-data-source` looks
-  like a legacy/orphaned type now that analytics point straight at
-  data-components.
-- `x-mitre-asset.x_mitre_related_assets` stays embedded as an attribute
-  rather than becoming a relationship: it references narrower device
-  sub-types by free-text name (41 of 43 references don't match any other
-  asset's `name` in the bundle at all — e.g. `Application Server` →
-  `File Server`), not another `x-mitre-asset` entity by id, so there's
-  nothing to resolve.
+  `x-mitre-data-component`: a from-scratch grep found zero `data_source_ref`
+  occurrences anywhere, so the two have no formal link left in this release —
+  the type looks legacy now that analytics point straight at data components.
+- `x-mitre-asset.x_mitre_related_assets` stays an attribute rather than becoming
+  an edge: it references narrower device sub-types by free-text name (41 of 43
+  don't match any other asset's `name` at all — e.g. `Application Server` →
+  `File Server`), not another asset by id, so there's nothing to resolve.
 - Native `relationship` objects (`uses`, `mitigates`, `detects`,
-  `subtechnique-of`, `revoked-by`, `attributed-to`, `targets`) are kept,
-  but — unlike before — their `source_ref`/
-  `target_ref` are no longer their endpoints' raw STIX ids: they're
-  rewritten through the same id resolution described above, so every
-  edge in this project's output (native, derived, and
-  external alike) now joins on the same human-readable id space.
-  `revoked`/`x_mitre_deprecated` are dropped from relationship records
-  specifically — verified always `false`/absent across all 24,582
-  relationships in this dataset, pure boilerplate with no signal.
-  `external_references` (citations) are dropped for the same bibliography
-  reason as everywhere else; `description` is kept when present, since —
-  unlike CWE/CAPEC relationships — ATT&CK relationship descriptions carry
-  real analytic content (e.g. *how* a piece of malware uses a technique).
-- Relationship records built by this script get a deterministic
-  `relationship--<uuid5>` id, seeded from every edge attribute (not just
-  `source_ref`/`relationship_type`/`target_ref`) — some derived edges
-  (`uses_data_component`) can legitimately repeat with the same triple but
-  different attributes (e.g. two distinct log-source channels feeding the
-  same data component). Reruns against the same input produce
-  byte-identical output.
+  `subtechnique-of`, `revoked-by`, `attributed-to`, `targets`) are kept, with
+  their endpoints rewritten through the same id resolution, so every edge here
+  joins on one id space. `revoked`/`x_mitre_deprecated` are dropped from edges
+  specifically — verified always false/absent across all 24,582.
+  `external_references` go for the usual bibliography reason; `description` is
+  kept, since unlike CWE/CAPEC edges ATT&CK's carry real analytic content (*how*
+  a piece of malware uses a technique).
+- Edges built by this script get a deterministic `relationship--<uuid5>` id
+  seeded from every attribute, not just the triple: some derived edges
+  (`uses_data_component`) legitimately repeat the same triple with different
+  attributes (two log-source channels feeding one data component). Reruns stay
+  byte-identical.
 
 ## Nothing in the output nests
 
-Neo4j properties hold scalars or homogeneous scalar arrays, never maps — so a
-`list[map]` field can't be loaded as a property at all. ATT&CK had exactly two
-(every other field on every record is already a scalar or a
-`list[str]`), each unpacked a different way because the two nested shapes mean
-different things:
+Neo4j properties hold scalars or homogeneous scalar arrays, never maps. ATT&CK
+had exactly two `list[map]` fields, unpacked differently because the two shapes
+mean different things:
 
-- **`x-mitre-data-component.x_mitre_log_sources`** (3,165 `{name, channel}`
-  maps across 114 of 123 components) → **`log-source` entities plus
-  `has_log_source` edges.** `name` is a genuine shared vocabulary — 351
-  distinct colon-namespaced codes (`WinEventLog:Security`, `AWS:CloudTrail`,
-  `macos:unifiedlog`) reused across many components — so it earns its own
-  entity type. That also retroactively fixes a modeling gap: the log source
-  already carried on 5,042 `uses_data_component` edges was a bare string with
-  no node behind it, and is now a `log_source_ref` resolving to a real entity
-  (all 309 names used there are among the 351; verified 0 dangling). A log
-  source's `id` is its name prefixed with its type — `log-source--AWS:CloudTrail`
-  — because 7 of the 351 names are bare words (`File`, `Process`, `Network`,
-  `Command`, `Certificate`, `Firmware`, `Metadata`) that D3FEND also uses as
-  artifact ids; unprefixed, those would be the only ids in the whole project
-  claimed by two different catalogs. The bare name stays on the record as
-  `name`. `channel` stays
-  an *edge* attribute rather than joining the log source's identity — 43% of
-  its values run past 60 characters of analyst prose (`"Unusual kinit or klist
-  activity"`), so it's a note about this component's use of that log source,
-  not an identifier. Deleting the field instead of unpacking it would have lost
-  212 `(component, name, channel)` facts and 42 log-source names that appear
-  nowhere else.
-- **`x-mitre-analytic.x_mitre_mutable_elements`** (5,177 `{field,
-  description}` maps across 1,793 of 2,066 analytics) → **two flat string
-  lists, no new entity.** Promoting these to nodes was rejected on the
-  numbers: 2,892 distinct `field` names, **83% of them used by exactly one
-  analytic**, and 5,145 distinct `description` values — a node per tunable
-  parameter would be roughly one node per edge, with nothing to traverse. What
-  *is* queryable is the field name alone (25 are shared by 10+ analytics —
-  `TimeWindow` ×659, `UserContext` ×246), so those become
-  `x_mitre_mutable_element_fields` as a `list[str]`. The per-analytic tuning
-  prose is preserved losslessly alongside as
-  `x_mitre_mutable_element_notes` — `"field -- description"` strings, chosen
-  over an index-aligned parallel list because Cypher can't enforce alignment
-  (the ` -- ` separator is verified absent from every field name and
+- **`x-mitre-data-component.x_mitre_log_sources`** (3,165 `{name, channel}` maps
+  across 114 of 123 components) → **`log-source` entities plus `has_log_source`
+  edges.** `name` is a genuine shared vocabulary — 351 colon-namespaced codes
+  (`WinEventLog:Security`, `AWS:CloudTrail`, `macos:unifiedlog`) reused across
+  components — so it earns its own type. That also fixes a modelling gap: the log
+  source already carried on 5,042 `uses_data_component` edges was a bare string
+  with no node behind it, and is now a `log_source_ref` resolving to a real entity
+  (all 309 names used there are among the 351; 0 dangling). A log source's `id` is
+  its name prefixed with its type (`log-source--AWS:CloudTrail`), because 7 of the
+  351 are bare words (`File`, `Process`, `Network`, `Command`, `Certificate`,
+  `Firmware`, `Metadata`) that D3FEND also uses as artifact ids — unprefixed
+  they'd be the only ids in the project claimed by two catalogs. The bare name
+  stays as `name`. `channel` stays an *edge* attribute rather than joining the
+  identity: 43% of its values run past 60 characters of analyst prose (`"Unusual
+  kinit or klist activity"`), so it's a note about this component's use of that
+  log source, not an identifier. Deleting the field instead would have lost 212
+  `(component, name, channel)` facts and 42 names appearing nowhere else.
+- **`x-mitre-analytic.x_mitre_mutable_elements`** (5,177 `{field, description}`
+  maps across 1,793 of 2,066 analytics) → **two flat string lists, no new
+  entity.** Promoting these to nodes was rejected on the numbers: 2,892 distinct
+  `field` names, **83% used by exactly one analytic**, and 5,145 distinct
+  descriptions — a node per tunable parameter would be roughly one node per edge,
+  with nothing to traverse. What *is* queryable is the field name alone (25 are
+  shared by 10+ analytics — `TimeWindow` ×659, `UserContext` ×246), so those
+  become `x_mitre_mutable_element_fields`. The tuning prose is preserved
+  losslessly as `x_mitre_mutable_element_notes` — `"field -- description"`
+  strings, chosen over an index-aligned parallel list because Cypher can't enforce
+  alignment (the ` -- ` separator is verified absent from every field name and
   description, so notes round-trip on a split).
 
-One related upstream data bug is normalized here: 184 raw `x_mitre_log_sources`
-entries carry the **literal string `"None"`** as their `channel` rather than
-JSON `null` (a `str(None)` leak on MITRE's side). Left alone, that loads as a
-real value and quietly pollutes any `channel` filter, so `clean_channel()`
-treats `"None"`/blank as "attribute absent" on both `has_log_source` and
-`uses_data_component` edges — 84 and 521 edges respectively now simply have no
-`channel` key.
+One upstream bug is normalized here: 184 raw `x_mitre_log_sources` entries carry
+the **literal string `"None"`** as `channel` rather than JSON `null` (a
+`str(None)` leak on MITRE's side). Left alone that loads as a real value and
+pollutes any `channel` filter, so `clean_channel()` treats `"None"`/blank as
+"attribute absent" on both edge types — 84 and 521 edges respectively now simply
+have no `channel` key.
 
 ## Output
 
@@ -246,36 +181,34 @@ Two JSON files, each a plain array of records.
 
 ### `entities.json` — 6,052 records
 
-Split by each record's own `type`:
-
 | `type` | Count | Contents |
 |---|---|---|
 | `x-mitre-analytic` | 2,066 | Detection analytics — id, stix_id, name, description, platforms, mutable-element field names + notes |
-| `attack-technique` | 1,166 | ATT&CK techniques/sub-techniques (STIX `attack-pattern`) — id, stix_id, name, description, platforms, sub-technique flag, and (ICS-only) tactic type/impact type/remote support |
+| `attack-technique` | 1,166 | Techniques/sub-techniques (STIX `attack-pattern`) — id, stix_id, name, description, platforms, sub-technique flag, and (ICS-only) tactic type/impact type/remote support |
 | `x-mitre-detection-strategy` | 920 | Detection strategies — id, stix_id, name |
 | `malware` | 862 | Malware — id, stix_id, name, description, platforms, aliases, `is_family` |
-| `log-source` | 351 | Log sources — id (`log-source--WinEventLog:Security`), name (the bare code). Synthesized from data components' embedded log-source maps; no STIX object of its own, hence no `stix_id` |
+| `log-source` | 351 | Log sources — id (`log-source--WinEventLog:Security`), name. Synthesized from data components' embedded maps; no STIX object of its own, hence no `stix_id` |
 | `intrusion-set` | 193 | Threat groups — id, stix_id, name, description, aliases |
 | `x-mitre-data-component` | 123 | Log data components — id, stix_id, name, description |
 | `attack-mitigation` | 110 | Mitigations (STIX `course-of-action`) — id, stix_id, name, description, compliance-framework labels |
 | `tool` | 97 | Tools — id, stix_id, name, description, platforms, aliases |
-| `campaign` | 60 | Named campaigns — id, stix_id, name, description, aliases, first/last seen dates |
+| `campaign` | 60 | Named campaigns — id, stix_id, name, description, aliases, first/last seen |
 | `x-mitre-data-source` | 42 | Log data sources — id, stix_id, name, description, collection layers, platforms |
-| `x-mitre-tactic` | 41 | ATT&CK tactics — id, stix_id, name, description |
+| `x-mitre-tactic` | 41 | Tactics — id, stix_id, name, description |
 | `x-mitre-asset` | 18 | ICS physical/logical assets — id, stix_id, name, description, platforms, sectors |
 | `x-mitre-matrix` | 3 | Matrix groupings — id, stix_id, name, description |
 
-`attack-mitigation` and `x-mitre-matrix` are smaller than a raw object
-count would suggest (334→110, 4→3) because of the id-collision deletions
-above, not because of any additional filtering.
+`attack-mitigation` and `x-mitre-matrix` are smaller than a raw object count
+suggests (334→110, 4→3) because of the id-collision deletions above, not any
+additional filtering.
 
 ### `relationships.json` — 36,346 records
 
-Every record is `type: "relationship"` with id, relationship_type,
-source_ref and target_ref. Three origins share the file: the hyphenated
-`relationship_type`s are ATT&CK's own native STIX edges, the underscored
-ones are derived from embedded id-list fields, and `related-to` is the
-cross-catalog edge — the only one carrying a `source_name`:
+Every record is `type: "relationship"` with id, relationship_type, source_ref and
+target_ref. Three origins share the file: hyphenated `relationship_type`s are
+ATT&CK's native STIX edges, underscored ones are derived from embedded id-list
+fields, and `related-to` is the cross-catalog edge — the only one carrying
+`source_name`:
 
 | `relationship_type` | Count | Endpoints | Origin |
 |---|---|---|---|
@@ -293,11 +226,8 @@ cross-catalog edge — the only one carrying a `source_name`:
 | `related-to` | 36 | `T####` → `CAPEC-N` (`source_name: "capec"`) | external |
 | `attributed-to` | 27 | campaign → group | native |
 
-Every entity record carries `id` (its ATT&CK id, or a STIX id fallback —
-see above) and `stix_id` (always the original STIX id, for traceability) —
-except the `log-source` records, which have no upstream STIX object to
-trace back to. Every edge — native, derived, and external alike —
-consistently uses these same `id` values as `source_ref`/`target_ref`;
-verified after every run that none of the 36,346 rows carries
-a raw STIX id (`<type>--<uuid>`) in either column, and that every endpoint
-resolves to an entity that exists.
+Every entity carries `id` and `stix_id` (except `log-source`, which has no
+upstream STIX object to trace back to), and every edge — native, derived and
+external alike — uses those same `id` values as endpoints. Verified after every
+run: none of the 36,346 rows carries a raw STIX id in either column, and every
+endpoint resolves to an entity that exists.
