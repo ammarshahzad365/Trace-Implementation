@@ -1,9 +1,12 @@
 # CWE Preprocessing
 
 Trims the raw CWE bundle (`data-acquisition/CWE/latest.json`) down to a
-fully flattened, relationship-linked set of JSON files. CWE's own JSON is a
-generic XML-to-JSON conversion, not native STIX — every relation
-(`RelatedWeaknesses`, `RelatedAttackPatterns`,
+fully flattened, relationship-linked pair of JSON files: `entities.json`
+and `relationships.json`, with each record's own `type` field
+distinguishing the kinds inside them.
+
+CWE's own JSON is a generic XML-to-JSON conversion, not native STIX — every
+relation (`RelatedWeaknesses`, `RelatedAttackPatterns`,
 `ObservedExamples`, `Relationships.HasMember`,
 `Members.HasMember`) starts out embedded inline on the entity record
 itself, and so do several *attribute*-shaped fields that themselves nest
@@ -13,8 +16,7 @@ script pulls every one of those out into its own `relationship` object
 (`id`, `type`, `relationship_type`, `source_ref`, `target_ref`, plus a few
 relationship-specific attributes) and removes the source field from the
 entity record, so entities and relationships are stored completely
-separately — the same split `capec_preprocessing.py` uses for its own
-`relationships.json` / `external_relationships.json`.
+separately — the same split `capec_preprocessing.py` uses.
 
 ## Usage
 
@@ -69,7 +71,7 @@ snapshot at all. Those are left in place: they're correct citations, and
   bundle (CWE's own bibliography content isn't part of this crawl).
 - The following fields are removed from their entity record and rebuilt as
   relationship records instead:
-  - `weakness.RelatedWeaknesses` → `relationships.json`, one edge per
+  - `weakness.RelatedWeaknesses` → one edge per
     `RelatedWeakness` entry. `relationship_type` is the `Nature` value
     lower-snake-cased (`child_of`, `can_precede`, `peer_of`, `can_also_be`,
     `requires`, `starts_with`); `ordinal`/`view_id` are kept as edge
@@ -79,17 +81,21 @@ snapshot at all. Those are left in place: they're correct citations, and
     `PeerOf` is reciprocal in just 16 of its 98 pairs, so collapsing would
     silently drop real one-directional edges rather than remove redundancy.
   - `category.Relationships.HasMember` / `view.Members.HasMember` →
-    `relationships.json`, `has_member` edges from the category/view to each
+    `has_member` edges from the category/view to each
     member weakness, with `view_id` kept as an edge attribute.
-  - `weakness.RelatedAttackPatterns` → `external_relationships.json`,
+  - `weakness.RelatedAttackPatterns` →
     `CWE-N --related-to--> CAPEC-N` edges (`source_name: "capec"`) — the
     reverse direction of CAPEC's own `CAPEC-N --related-to--> CWE-N` edges.
-  - `weakness.ObservedExamples` → `external_relationships.json`,
+  - `weakness.ObservedExamples` →
     `CWE-N --related-to--> CVE-N` edges (`source_name: "cve"`), with
     `description`/`link` as edge attributes. Examples whose `Reference` is a
     bare bibliography id instead of a CVE (e.g. `[REF-1374]`) are dropped,
-    not extracted, since `external_relationships.json` is scoped to
-    CVE/CAPEC only.
+    not extracted, since outward-pointing edges are scoped to CVE/CAPEC
+    only.
+  - Those last two are the only edges carrying a `source_name`, which is
+    what marks an edge as pointing outside this bundle. They share
+    `relationships.json` with the internal edges rather than sitting in a
+    file of their own.
   - Relationship records get a deterministic `relationship--<uuid5>` id.
     Unlike CAPEC's version of this helper, the seed also folds in every
     extra edge attribute (not just `source_ref`/`relationship_type`/
@@ -186,17 +192,43 @@ distinct `Type` values) is unwrapped the same way to a plain
 
 ## Output
 
-Ten JSON files, each a plain array of records:
+Two JSON files, each a plain array of records.
 
-| File | Count | Contents |
+### `entities.json` — 5,056 records
+
+Split by each record's own `type`. The first three are CWE's own object
+kinds; the rest are sub-records promoted out of `weakness` (see above):
+
+| `type` | Count | Contents |
 |---|---|---|
-| `weaknesses.json` | 969 | CWE weaknesses — id, name, description, extended description, abstraction/structure/status, ordinalities (flat array), likelihood of exploit, background details, affected resources, functional areas, aliases + alias notes |
-| `categories.json` | 422 | Organizational groupings — id, name, summary |
-| `views.json` | 59 | Organizational groupings for browsing/filtering — id, name, objective, `view_type` (renamed from the source's `Type` to avoid colliding with the entity-kind `type`), audience (flat array of stakeholder types) |
-| `consequences.json` | 311 | Deduped `(scope, impact)` pairs — id, type, scope (array), impact (array) |
-| `platforms.json` | 1,527 | Deduped `(category, name)` platforms (plus private nodes for unnamed entries) — id, type, category, name |
-| `introductions.json` | 16 | Deduped introduction phases — id, type, phase |
-| `mitigations.json` | 1,253 | Deduped-by-`Mitigation_ID` mitigations (70) plus private per-weakness nodes for the rest (1,183) — id, type, mitigation_id |
-| `detection_methods.json` | 499 | Deduped-by-`Detection_Method_ID` detection methods (23) plus private per-weakness nodes for the rest (476) — id, type, detection_method_id |
-| `relationships.json` | 14,002 | Edges between entities defined in this bundle — `has_member` (5,024: category/view → weakness), `applies_to_platform` (2,072), `has_mitigation` (1,710), `introduced_in` (1,398), `child_of` (1,318), `has_consequence` (1,237), `has_detection_method` (959), `can_precede` (143), `peer_of` (98), `can_also_be` (27), `requires` (13), `starts_with` (3) |
-| `external_relationships.json` | 4,337 | Edges to identifiers outside this bundle, `relationship_type: "related-to"` throughout, disambiguated by `source_name` — `cve` (3,125, from `ObservedExamples`), `capec` (1,212, from `RelatedAttackPatterns`) |
+| `weakness` | 969 | CWE weaknesses — id, name, description, extended description, abstraction/structure/status, ordinalities (flat array), likelihood of exploit, background details, affected resources, functional areas, aliases + alias notes |
+| `category` | 422 | Organizational groupings — id, name, summary |
+| `view` | 59 | Organizational groupings for browsing/filtering — id, name, objective, `view_type` (renamed from the source's `Type` to avoid colliding with the entity-kind `type`), audience (flat array of stakeholder types) |
+| `platform` | 1,527 | Deduped `(category, name)` platforms (plus private nodes for unnamed entries) — id, category, name |
+| `mitigation` | 1,253 | Deduped-by-`Mitigation_ID` mitigations (70) plus private per-weakness nodes for the rest (1,183) — id, mitigation_id |
+| `detection-method` | 499 | Deduped-by-`Detection_Method_ID` detection methods (23) plus private per-weakness nodes for the rest (476) — id, detection_method_id |
+| `consequence` | 311 | Deduped `(scope, impact)` pairs — id, scope (array), impact (array) |
+| `introduction` | 16 | Deduped introduction phases — id, phase |
+
+### `relationships.json` — 18,339 records
+
+Every record is `type: "relationship"` with id, relationship_type,
+source_ref and target_ref. The 4,337 `related-to` edges are the ones
+pointing *outside* this bundle, and are the only ones carrying a
+`source_name`:
+
+| `relationship_type` | Count | Endpoints |
+|---|---|---|
+| `has_member` | 5,024 | category/view → weakness |
+| `related-to` | 4,337 | weakness → CVE (3,125, `source_name: "cve"`, from `ObservedExamples`) or → CAPEC (1,212, `source_name: "capec"`, from `RelatedAttackPatterns`) |
+| `applies_to_platform` | 2,072 | weakness → platform |
+| `has_mitigation` | 1,710 | weakness → mitigation |
+| `introduced_in` | 1,398 | weakness → introduction |
+| `child_of` | 1,318 | weakness → weakness |
+| `has_consequence` | 1,237 | weakness → consequence |
+| `has_detection_method` | 959 | weakness → detection-method |
+| `can_precede` | 143 | weakness → weakness |
+| `peer_of` | 98 | weakness → weakness |
+| `can_also_be` | 27 | weakness → weakness |
+| `requires` | 13 | weakness → weakness |
+| `starts_with` | 3 | weakness → weakness |

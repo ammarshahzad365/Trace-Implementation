@@ -1,35 +1,38 @@
 """CAPEC field-projection preprocessor.
 
 Reads the raw STIX 2.1 bundle produced by the CAPEC crawler
-(`data-acquisition/CAPEC/latest.json`) and writes five trimmed JSON files.
-`identity` and `marking-definition` objects are dropped entirely -- they're
-pure STIX attribution/marking boilerplate, not domain content.
+(`data-acquisition/CAPEC/latest.json`) and writes exactly two trimmed JSON
+files: `entities.json` (attack patterns, courses of action, consequences)
+and `relationships.json` (every edge). A record's own `type` field is what
+distinguishes the kinds inside each file, so no third file is needed to say
+which is which. `identity` and `marking-definition` objects are dropped
+entirely -- they're pure STIX attribution/marking boilerplate, not domain
+content.
 
 `external_references` is not kept verbatim on attack-pattern records:
 - its `source_name == "capec"` entry (always exactly one) determines the
   record's own `id`: attack-patterns are keyed by `CAPEC-N` (e.g.
   `CAPEC-85`) everywhere in this project's output, not by their STIX id.
   The original STIX id is kept alongside as `stix_id`.
-- its `cwe` / `ATTACK` entries become STIX-shaped relationship records in a
-  separate `external_relationships.json` (`CAPEC-N --related-to--> CWE-N` /
-  `--related-to--> T####`), the same shape as `relationships.json`'s
-  `mitigates` edges.
+- its `cwe` / `ATTACK` entries become STIX-shaped relationship records
+  (`CAPEC-N --related-to--> CWE-N` / `--related-to--> T####`), carrying
+  `source_name` to say which external catalog they point into.
 - its `reference_from_CAPEC` / `OWASP Attacks` / `WASC` entries (bibliographic
   citations, no local entity) are dropped entirely, not stored anywhere.
 
-`relationship` objects (`relationships.json`) keep their own native STIX
-`id`, but any `source_ref`/`target_ref` that points at an attack-pattern is
-rewritten from that attack-pattern's STIX id to its `CAPEC-N` id, so every
-reference to a CAPEC attack-pattern anywhere in this project's output uses
-the same `CAPEC-N` key.
+Native `relationship` objects keep their own STIX `id`, but any
+`source_ref`/`target_ref` that points at an attack-pattern is rewritten from
+that attack-pattern's STIX id to its `CAPEC-N` id, so every reference to a
+CAPEC attack-pattern anywhere in this project's output uses the same
+`CAPEC-N` key.
 
 `x_capec_status` and `x_capec_execution_flow` are dropped with no
 replacement. The attack-pattern-to-attack-pattern ref fields
 (`x_capec_child_of_refs`/`x_capec_parent_of_refs`,
 `x_capec_can_precede_refs`/`x_capec_can_follow_refs`,
 `x_capec_peer_of_refs`) and `x_capec_alternate_terms` are likewise removed
-from attack_patterns.json and instead become STIX-shaped relationship
-records in `attack_pattern_relationships.json`:
+from the attack-pattern records and instead become STIX-shaped relationship
+records:
 - `child_of`/`parent_of` and `can_precede`/`can_follow` are each perfectly
   reciprocal pairs in the source data, so only one direction is emitted
   (`child_of`, `can_precede`) to avoid storing every edge twice.
@@ -42,8 +45,8 @@ records in `attack_pattern_relationships.json`:
 
 `x_capec_consequences` and `x_capec_skills_required` are the only two fields
 in CAPEC's output that were maps rather than scalars/scalar lists -- illegal
-as Neo4j properties. `x_capec_consequences` is unpacked into its own entity
-file plus edges (see `build_consequence_relationships()`).
+as Neo4j properties. `x_capec_consequences` is unpacked into `consequence`
+entities plus edges (see `build_consequence_relationships()`).
 `x_capec_skills_required` is dropped outright: it is not carried on the
 attack-pattern record (`ATTACK_PATTERN_FIELDS` is a whitelist and omits it),
 and it no longer becomes `requires_skill` edges or `skill-level` entities
@@ -103,7 +106,7 @@ FIELDS_BY_TYPE: Dict[str, Tuple[str, ...]] = {
 
 DROPPED_TYPES = {"identity", "marking-definition"}
 
-# external_references source_name values that become external_relationships.json rows.
+# external_references source_name values that become outward-pointing edges.
 EXTERNAL_RELATIONSHIP_SOURCE_NAMES = {"cwe", "ATTACK"}
 
 EXTERNAL_RELATIONSHIP_TYPE = "related-to"
@@ -140,14 +143,18 @@ CONSEQUENCE_SCOPE_ALIASES: Dict[str, str] = {"Access_Control": "Access Control"}
 # prefix, since there's no other source's spelling to agree with.
 FIELD_NAME_OVERRIDES: Dict[str, str] = {"x_capec_extended_description": "extended_description"}
 
-OUTPUT_FILENAMES: Dict[str, str] = {
-    "attack-pattern": "attack_patterns.json",
-    "course-of-action": "courses_of_action.json",
-    CONSEQUENCE_ENTITY_TYPE: "consequences.json",
-    "relationship": "relationships.json",
-    EXTERNAL_RELATIONSHIP_KEY: "external_relationships.json",
-    ATTACK_PATTERN_RELATIONSHIP_KEY: "attack_pattern_relationships.json",
-}
+ENTITIES_FILENAME = "entities.json"
+RELATIONSHIPS_FILENAME = "relationships.json"
+
+# Which `parse()` result keys hold edges; every other key holds entities. The keys
+# themselves stay per-kind so the run summary can still report a breakdown, but they
+# no longer map to a file each -- output is exactly two files, and a record's own
+# `type` field is what distinguishes the kinds inside them.
+RELATIONSHIP_KEYS: Tuple[str, ...] = (
+    "relationship",
+    EXTERNAL_RELATIONSHIP_KEY,
+    ATTACK_PATTERN_RELATIONSHIP_KEY,
+)
 
 
 class ParseError(RuntimeError):
@@ -192,6 +199,7 @@ def make_relationship(source_ref: str, target_ref: str, relationship_type: str, 
 def build_external_relationships(obj: Dict[str, Any], capec_id: int) -> List[Dict[str, Any]]:
     source_ref = f"CAPEC-{capec_id}"
     relationships = []
+    seen = set()
     for ref in obj.get("external_references", []):
         source_name = ref.get("source_name")
         if source_name not in EXTERNAL_RELATIONSHIP_SOURCE_NAMES:
@@ -199,6 +207,9 @@ def build_external_relationships(obj: Dict[str, Any], capec_id: int) -> List[Dic
         target_ref = ref.get("external_id")
         if not target_ref:
             continue
+        if (source_name, target_ref) in seen:
+            continue  # 3 attack patterns list the same external reference twice upstream
+        seen.add((source_name, target_ref))
         relationships.append(make_relationship(source_ref, target_ref, EXTERNAL_RELATIONSHIP_TYPE, source_name=source_name))
     return relationships
 
@@ -366,17 +377,23 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     return result
 
 
+def write_json(path: Path, records: List[Dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(records, handle, indent=2)
+        handle.write("\n")
+
+
 def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> Dict[str, int]:
+    """Write every entity record to entities.json and every edge to relationships.json,
+    concatenated in `result`'s own insertion order so reruns are byte-stable."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    counts: Dict[str, int] = {}
-    for obj_type, records in result.items():
-        filename = OUTPUT_FILENAMES[obj_type]
-        path = output_dir / filename
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(records, handle, indent=2)
-            handle.write("\n")
-        counts[obj_type] = len(records)
-    return counts
+    entities: List[Dict[str, Any]] = []
+    relationships: List[Dict[str, Any]] = []
+    for key, records in result.items():
+        (relationships if key in RELATIONSHIP_KEYS else entities).extend(records)
+    write_json(output_dir / ENTITIES_FILENAME, entities)
+    write_json(output_dir / RELATIONSHIPS_FILENAME, relationships)
+    return {key: len(records) for key, records in result.items()}
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -393,11 +410,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default=str(default_output_dir),
-        help=(
-            "Directory to write attack_patterns.json / courses_of_action.json / "
-            "consequences.json / relationships.json / external_relationships.json / "
-            f"attack_pattern_relationships.json (default: {default_output_dir})"
-        ),
+        help=f"Directory to write entities.json / relationships.json (default: {default_output_dir})",
     )
     return parser.parse_args(argv)
 
@@ -411,15 +424,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         objects = load_objects(input_path)
         result = parse(objects)
         counts = write_outputs(result, output_dir)
+        entity_total = sum(count for key, count in counts.items() if key not in RELATIONSHIP_KEYS)
+        relationship_total = sum(count for key, count in counts.items() if key in RELATIONSHIP_KEYS)
         print(
-            "[capec-parser] wrote "
-            f"{counts['attack-pattern']} attack-patterns, "
+            f"[capec-parser] wrote {entity_total} entities to {ENTITIES_FILENAME} "
+            f"({counts['attack-pattern']} attack-patterns, "
             f"{counts['course-of-action']} courses-of-action, "
-            f"{counts[CONSEQUENCE_ENTITY_TYPE]} consequences, "
-            f"{counts['relationship']} relationships, "
-            f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external relationships, "
-            f"{counts[ATTACK_PATTERN_RELATIONSHIP_KEY]} attack-pattern relationships "
-            f"to {output_dir}"
+            f"{counts[CONSEQUENCE_ENTITY_TYPE]} consequences) and "
+            f"{relationship_total} relationships to {RELATIONSHIPS_FILENAME} "
+            f"({counts['relationship']} native, "
+            f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external, "
+            f"{counts[ATTACK_PATTERN_RELATIONSHIP_KEY]} attack-pattern-derived), "
+            f"in {output_dir}"
         )
         return 0
     except (ParseError, OSError, json.JSONDecodeError) as exc:

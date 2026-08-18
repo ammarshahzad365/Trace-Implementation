@@ -2,18 +2,18 @@
 
 Reads five raw JSON files produced by the D3FEND crawler
 (`data-acquisition/mitre-defend/{techniques,tactics,artifacts,weaknesses,
-mappings}/latest.json`) and writes four trimmed JSON files: one per entity
-type (`technique`/`tactic`/`artifact`), plus one `relationships.json`
-covering every edge in the dataset. `offensive-techniques/latest.json` is
-read by the crawler but not by this script (see below); `weaknesses/
-latest.json` is read here for its embedded `child_of`/`weakness_of`/
-`may_be_weakness_of` relationships but no longer produces its own entity
-file either -- both `offensive-technique` and `weakness` records are
-mirrors of another source in this project (ATT&CK techniques, CWE
-weaknesses respectively) with no local entity file of their own anymore;
+mappings}/latest.json`) and writes exactly two trimmed JSON files:
+`entities.json` (the `technique`/`tactic`/`artifact` records, distinguished
+by their own `type` field) and `relationships.json` (every edge in the
+dataset). `offensive-techniques/latest.json` is read by the crawler but not
+by this script (see below); `weaknesses/latest.json` is read here for its
+embedded `child_of`/`weakness_of`/`may_be_weakness_of` relationships but
+contributes no entity records -- both `offensive-technique` and `weakness`
+records are mirrors of another source in this project (ATT&CK techniques,
+CWE weaknesses respectively) with no local entity of their own anymore;
 join their relationship endpoints directly against
-`data-preprocessing/mitre-attack/techniques.json` /
-`data-preprocessing/CWE/weaknesses.json` by `id`.
+`data-preprocessing/mitre-attack/entities.json` /
+`data-preprocessing/CWE/entities.json` by `id`.
 
 Both mirrors were checked before dropping: all 835 `offensive-technique`
 ids and all 943 `weakness` ids exist in their respective source. For
@@ -47,8 +47,8 @@ records also carry typed-literal values (`{"@type": "...integer", "@value":
 this project's *own* crawler bookkeeping (D3FEND has no native timestamps
 at all, per the crawler's README), not domain content. `@type` is dropped
 too -- pure OWL/RDF class-membership boilerplate (`"owl:Class"`,
-`"owl:NamedIndividual"`), not analytically useful once the record is
-already sorted into its own per-type output file.
+`"owl:NamedIndividual"`), not analytically useful once the record already
+carries this project's own `type` discriminator.
 
 ## Ids double as this dataset's own cross-references
 
@@ -57,11 +57,13 @@ normalization applied uniformly across every entity type and every
 relationship endpoint) happens to produce exactly the id strings
 (`CWE-1004`, `T1055.001`) that `data-preprocessing/CWE`/`mitre-attack`
 already use for the same underlying concepts -- see above. Given the id
-values are literally identical strings across datasets, there's nothing
-for an `external_relationships.json` to express beyond that identity,
-unlike CAPEC's `CAPEC-N`/CWE's `CWE-N`, genuinely different id spaces for
-genuinely different entities referencing each other. So this preprocessor
-does **not** produce an `external_relationships.json`.
+values are literally identical strings across datasets, there's nothing a
+dedicated external edge would express beyond that identity, unlike CAPEC's
+`CAPEC-N`/CWE's `CWE-N`, genuinely different id spaces for genuinely
+different entities referencing each other. So unlike every other
+preprocessor here, none of D3FEND's edges carry a `source_name` -- the
+cross-catalog ones are indistinguishable from the local ones, and that is
+the point.
 
 Because D3FEND provides a distinct human-facing short code
 (`d3f:d3fend-id`, e.g. `D3-AMED`) for `technique` records only, every
@@ -73,7 +75,7 @@ key across every type. `d3fend_id` is kept as an extra attribute on
 ## What becomes a relationship
 
 - `artifact.rdfs:hasSubClass` -> `has_subclass` edges (artifact -> child
-  artifact). Verified to resolve 100% within `artifacts.json`.
+  artifact). Verified to resolve 100% within this dataset's own artifacts.
 - `weakness.rdfs:subClassOf` -> `child_of` edges (weakness -> parent
   weakness), the same relationship_type CWE's own preprocessor uses for
   the analogous edge. 10 of 1,113 parent refs point at the abstract root
@@ -81,7 +83,7 @@ key across every type. `d3fend_id` is kept as an extra attribute on
   dropped, not emitted as edges to a non-entity.
 - `weakness.d3f:weakness-of` / `d3f:may-be-weakness-of` -> `weakness_of` /
   `may_be_weakness_of` edges (weakness -> artifact). Both verified to
-  resolve 100% into `artifacts.json`.
+  resolve 100% into this dataset's own artifacts.
 - `tactic.rdfs:subClassOf` is **dropped entirely, with no relationship
   emitted** -- every one of the 7 tactics points at the same abstract root
   class `d3f:DefensiveTactic`, not at another tactic; there is no real
@@ -92,7 +94,7 @@ key across every type. `d3fend_id` is kept as an extra attribute on
   rows:
   - `technique --{def_artifact_rel_label}--> artifact` (166 unique edges,
     e.g. `analyzes`, `filters`, `isolates`) -- a fact not available
-    anywhere else in this dataset (`techniques.json` alone carries no
+    anywhere else in this dataset (the technique records alone carry no
     artifact relation).
   - `technique --enables--> tactic` (149 edges, one per technique --
     verified stable: every technique maps to exactly one tactic across
@@ -148,12 +150,14 @@ MAY_BE_WEAKNESS_OF_RELATIONSHIP_TYPE = "may_be_weakness_of"
 ENABLES_RELATIONSHIP_TYPE = "enables"
 COUNTERS_RELATIONSHIP_TYPE = "counters"
 
-OUTPUT_FILENAMES: Dict[str, str] = {
-    "technique": "techniques.json",
-    "tactic": "tactics.json",
-    "artifact": "artifacts.json",
-    "relationship": "relationships.json",
-}
+ENTITIES_FILENAME = "entities.json"
+RELATIONSHIPS_FILENAME = "relationships.json"
+
+# Which `parse()` result keys hold edges; every other key holds entities. The keys
+# themselves stay per-kind so the run summary can still report a breakdown, but they
+# no longer map to a file each -- output is exactly two files, and a record's own
+# `type` field is what distinguishes the kinds inside them.
+RELATIONSHIP_KEYS: Tuple[str, ...] = ("relationship",)
 
 
 class ParseError(RuntimeError):
@@ -402,23 +406,29 @@ def parse(domains: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, 
         f"{len(domains['technique'])} techniques, "
         f"{len(domains['tactic'])} tactics, "
         f"{len(domains['artifact'])} artifacts, "
-        f"{len(domains['weakness'])} weaknesses (relationships only, no entity file), "
+        f"{len(domains['weakness'])} weaknesses (relationships only, no entity records), "
         f"{len(domains['mapping'])} mapping rows"
     )
     return result
 
 
+def write_json(path: Path, records: List[Dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(records, handle, indent=2)
+        handle.write("\n")
+
+
 def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> Dict[str, int]:
+    """Write every entity record to entities.json and every edge to relationships.json,
+    concatenated in `result`'s own insertion order so reruns are byte-stable."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    counts: Dict[str, int] = {}
-    for obj_type, records in result.items():
-        filename = OUTPUT_FILENAMES[obj_type]
-        path = output_dir / filename
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(records, handle, indent=2)
-            handle.write("\n")
-        counts[obj_type] = len(records)
-    return counts
+    entities: List[Dict[str, Any]] = []
+    relationships: List[Dict[str, Any]] = []
+    for key, records in result.items():
+        (relationships if key in RELATIONSHIP_KEYS else entities).extend(records)
+    write_json(output_dir / ENTITIES_FILENAME, entities)
+    write_json(output_dir / RELATIONSHIPS_FILENAME, relationships)
+    return {key: len(records) for key, records in result.items()}
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -435,7 +445,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default=str(default_output_dir),
-        help=f"Directory to write the trimmed entity/relationship files to (default: {default_output_dir})",
+        help=f"Directory to write entities.json / relationships.json (default: {default_output_dir})",
     )
     return parser.parse_args(argv)
 
@@ -449,13 +459,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         domains = {domain: load_domain(input_dir, domain) for domain in DOMAIN_FILES}
         result = parse(domains)
         counts = write_outputs(result, output_dir)
+        entity_total = sum(count for key, count in counts.items() if key not in RELATIONSHIP_KEYS)
         print(
-            "[mitre-defend-parser] wrote "
-            f"{counts['technique']} techniques, "
+            f"[mitre-defend-parser] wrote {entity_total} entities to {ENTITIES_FILENAME} "
+            f"({counts['technique']} techniques, "
             f"{counts['tactic']} tactics, "
-            f"{counts['artifact']} artifacts, "
-            f"{counts['relationship']} relationships "
-            f"to {output_dir}"
+            f"{counts['artifact']} artifacts) and "
+            f"{counts['relationship']} relationships to {RELATIONSHIPS_FILENAME}, "
+            f"in {output_dir}"
         )
         return 0
     except (ParseError, OSError, json.JSONDecodeError) as exc:

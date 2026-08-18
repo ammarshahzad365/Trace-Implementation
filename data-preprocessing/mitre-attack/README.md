@@ -2,8 +2,10 @@
 
 Merges the three raw STIX 2.1 bundles from the ATT&CK crawler
 (`data-acquisition/mitre-attack/{enterprise,mobile,ics}/latest.json`) into
-one deduplicated set of trimmed entity/relationship files, splitting every
-embedded id-list field out into explicit relationship records.
+one deduplicated pair of trimmed files — `entities.json` and
+`relationships.json`, with each record's own `type` field distinguishing
+the fourteen entity kinds inside the first — splitting every embedded
+id-list field out into explicit relationship records.
 
 ## Usage
 
@@ -66,7 +68,7 @@ side** rather than keeping it under a fallback id:
   mitigation is dropped — the id originally belonged to the technique, and
   some of these techniques, though later revoked in favor of a
   subtechnique, are the *only* source of a CAPEC cross-reference this
-  project has for them (all 36 rows of `external_relationships.json` come
+  project has for them (all 36 CAPEC cross-reference edges come
   from exactly this bucket) — keeping a revoked technique beats deleting
   the one link to CAPEC it carries.
 - For the two same-type collisions (`malware`, `x-mitre-matrix`), whichever
@@ -76,8 +78,7 @@ side** rather than keeping it under a fallback id:
   default if a future one produces one.
 
 226 objects are dropped this way (224 `course-of-action`, 1 `malware`, 1
-`x-mitre-matrix`) — 0 `attack-pattern` records. Any relationship in
-`relationships.json` that pointed at a dropped object is dropped along with
+`x-mitre-matrix`) — 0 `attack-pattern` records. Any relationship that pointed at a dropped object is dropped along with
 it. Verified after every run: every remaining entity id is globally unique,
 and every relationship endpoint (native, derived, and external) resolves.
 
@@ -91,19 +92,20 @@ and every relationship endpoint (native, derived, and external) resolves.
   list per type).
 - The output `type` field renames STIX's own `attack-pattern` →
   `attack-technique` and `course-of-action` → `attack-mitigation`
-  (`techniques.json`/`courses_of_action.json` respectively — the STIX type
+  (the STIX type
   is unchanged everywhere else it appears, e.g. `kill_chain_phases`
   matching below, and CAPEC's own `attack-pattern`/`course-of-action`
   records are untouched). CAPEC reuses those same two STIX types for its
   own, unrelated attack patterns/mitigations — left as-is, this pair would
-  be the only `type` value shared by two different entity files in the
+  be the only `type` value shared by two different catalogs in the
   whole project (every other type is already unique across all five
   sources), which would merge two catalogs' worth of distinct entities
   under one Neo4j label.
 - `external_references` is never kept verbatim, beyond the id extraction
   described above, on any type:
-  - its `capec` entries become `T#### --related-to--> CAPEC-N` records in
-    `external_relationships.json` (`source_name: "capec"`) — the reverse
+  - its `capec` entries become `T#### --related-to--> CAPEC-N` records
+    carrying `source_name: "capec"`, which is what marks them as pointing
+    outside this catalog — the reverse
     direction of CAPEC's own `CAPEC-N --related-to--> T####` edges.
   - every other entry is a bibliographic citation with no local entity to
     point at, and is dropped along with the field itself — same treatment
@@ -132,27 +134,24 @@ and every relationship endpoint (native, derived, and external) resolves.
 - The following embedded id-list fields are removed from their entity
   record and rebuilt as relationships instead, using each endpoint's own
   (resolved) `id` as `source_ref`/`target_ref` — the same convention CAPEC
-  uses for its own derived `attack_pattern_relationships.json`:
-  - `attack-pattern.kill_chain_phases` → `derived_relationships.json`,
-    `has_tactic` edges. ATT&CK has no `relationship` object for
+  uses for its own derived edges:
+  - `attack-pattern.kill_chain_phases` → `has_tactic` edges. ATT&CK has no `relationship` object for
     technique-to-tactic membership at all — it's a string match between
     `kill_chain_phases[].phase_name` and `x-mitre-tactic.x_mitre_shortname`,
     scoped to the domain implied by `kill_chain_phases[].kill_chain_name`
     (`mitre-attack` → `enterprise-attack`, `mitre-mobile-attack` →
     `mobile-attack`, `mitre-ics-attack` → `ics-attack`). Tactic shortnames
     are unique within every domain, so this match is unambiguous.
-  - `x-mitre-matrix.tactic_refs` → `derived_relationships.json`,
-    `has_member` edges (matrix → tactic) — mirrors the `has_member` edges
+  - `x-mitre-matrix.tactic_refs` → `has_member` edges (matrix → tactic) — mirrors the `has_member` edges
     CWE derives from its own `Relationships.HasMember`/`Members.HasMember`.
-  - `x-mitre-detection-strategy.x_mitre_analytic_refs` →
-    `derived_relationships.json`, `has_analytic` edges (detection-strategy
-    → analytic).
+  - `x-mitre-detection-strategy.x_mitre_analytic_refs` → `has_analytic`
+    edges (detection-strategy → analytic).
   - `x-mitre-analytic.x_mitre_log_source_references[].x_mitre_data_component_ref`
-    → `derived_relationships.json`, `uses_data_component` edges (analytic
+    → `uses_data_component` edges (analytic
     → data-component), with the log source kept as an edge attribute
-    (`log_source_ref`, a `log_sources.json` id) alongside `channel`.
-  - `x-mitre-data-component.x_mitre_log_sources[].name` →
-    `derived_relationships.json`, `has_log_source` edges (data-component →
+    (`log_source_ref`, a `log-source` entity id) alongside `channel`.
+  - `x-mitre-data-component.x_mitre_log_sources[].name` → `has_log_source`
+    edges (data-component →
     log-source), with `channel` as an edge attribute — see the nesting
     section below.
 - `x-mitre-data-source` is kept as a plain entity list with no edges to
@@ -168,11 +167,11 @@ and every relationship endpoint (native, derived, and external) resolves.
   `File Server`), not another `x-mitre-asset` entity by id, so there's
   nothing to resolve.
 - Native `relationship` objects (`uses`, `mitigates`, `detects`,
-  `subtechnique-of`, `revoked-by`, `attributed-to`, `targets`) are kept in
-  `relationships.json`, but — unlike before — their `source_ref`/
+  `subtechnique-of`, `revoked-by`, `attributed-to`, `targets`) are kept,
+  but — unlike before — their `source_ref`/
   `target_ref` are no longer their endpoints' raw STIX ids: they're
   rewritten through the same id resolution described above, so every
-  relationship file in this project's output (native, derived, and
+  edge in this project's output (native, derived, and
   external alike) now joins on the same human-readable id space.
   `revoked`/`x_mitre_deprecated` are dropped from relationship records
   specifically — verified always `false`/absent across all 24,582
@@ -193,12 +192,12 @@ and every relationship endpoint (native, derived, and external) resolves.
 
 Neo4j properties hold scalars or homogeneous scalar arrays, never maps — so a
 `list[map]` field can't be loaded as a property at all. ATT&CK had exactly two
-(every other field across all seventeen files is already a scalar or a
+(every other field on every record is already a scalar or a
 `list[str]`), each unpacked a different way because the two nested shapes mean
 different things:
 
 - **`x-mitre-data-component.x_mitre_log_sources`** (3,165 `{name, channel}`
-  maps across 114 of 123 components) → **`log_sources.json` entities plus
+  maps across 114 of 123 components) → **`log-source` entities plus
   `has_log_source` edges.** `name` is a genuine shared vocabulary — 351
   distinct colon-namespaced codes (`WinEventLog:Security`, `AWS:CloudTrail`,
   `macos:unifiedlog`) reused across many components — so it earns its own
@@ -210,7 +209,7 @@ different things:
   — because 7 of the 351 names are bare words (`File`, `Process`, `Network`,
   `Command`, `Certificate`, `Firmware`, `Metadata`) that D3FEND also uses as
   artifact ids; unprefixed, those would be the only ids in the whole project
-  claimed by two different entity files. The bare name stays on the record as
+  claimed by two different catalogs. The bare name stays on the record as
   `name`. `channel` stays
   an *edge* attribute rather than joining the log source's identity — 43% of
   its values run past 60 characters of analyst prose (`"Unusual kinit or klist
@@ -243,37 +242,62 @@ treats `"None"`/blank as "attribute absent" on both `has_log_source` and
 
 ## Output
 
-Seventeen JSON files, each a plain array of records:
+Two JSON files, each a plain array of records.
 
-| File | Count | Contents |
+### `entities.json` — 6,052 records
+
+Split by each record's own `type`:
+
+| `type` | Count | Contents |
 |---|---|---|
-| `techniques.json` | 1,166 | ATT&CK techniques/sub-techniques (`type: "attack-technique"`, STIX `attack-pattern`) — id, stix_id, name, description, platforms, sub-technique flag, and (ICS-only) tactic type/impact type/remote support |
-| `malware.json` | 862 | `malware` — id, stix_id, name, description, platforms, aliases, `is_family` |
-| `tools.json` | 97 | `tool` — id, stix_id, name, description, platforms, aliases |
-| `intrusion_sets.json` | 193 | Threat groups (`intrusion-set`) — id, stix_id, name, description, aliases |
-| `campaigns.json` | 60 | Named campaigns (`campaign`) — id, stix_id, name, description, aliases, first/last seen dates |
-| `courses_of_action.json` | 110 | Mitigations (`type: "attack-mitigation"`, STIX `course-of-action`) — id, stix_id, name, description, compliance-framework labels |
-| `tactics.json` | 41 | ATT&CK tactics (`x-mitre-tactic`) — id, stix_id, name, description |
-| `matrices.json` | 3 | Matrix groupings (`x-mitre-matrix`) — id, stix_id, name, description |
-| `analytics.json` | 2,066 | Detection analytics (`x-mitre-analytic`) — id, stix_id, name, description, platforms, mutable-element field names + notes |
-| `detection_strategies.json` | 920 | Detection strategies (`x-mitre-detection-strategy`) — id, stix_id, name |
-| `data_components.json` | 123 | Log data components (`x-mitre-data-component`) — id, stix_id, name, description |
-| `data_sources.json` | 42 | Log data sources (`x-mitre-data-source`) — id, stix_id, name, description, collection layers, platforms |
-| `assets.json` | 18 | ICS physical/logical assets (`x-mitre-asset`) — id, stix_id, name, description, platforms, sectors |
-| `log_sources.json` | 351 | Log sources (`type: "log-source"`) — id (`log-source--WinEventLog:Security`), name (the bare code). Synthesized from data components' embedded log-source maps; no STIX object of its own, hence no `stix_id` |
-| `relationships.json` | 24,552 | Native STIX edges — `uses` (19,988), `mitigates` (2,017), `detects` (918), `targets` (842, technique → ICS asset), `subtechnique-of` (542), `revoked-by` (218), `attributed-to` (27) |
-| `derived_relationships.json` | 11,758 | Edges rebuilt from embedded id-list fields — `uses_data_component` (5,042, analytic → data-component), `has_log_source` (3,165, data-component → log-source), `has_analytic` (2,066, detection-strategy → analytic), `has_tactic` (1,446, technique → tactic), `has_member` (39, matrix → tactic) |
-| `external_relationships.json` | 36 | `T#### --related-to--> CAPEC-N` edges, `source_name: "capec"` |
+| `x-mitre-analytic` | 2,066 | Detection analytics — id, stix_id, name, description, platforms, mutable-element field names + notes |
+| `attack-technique` | 1,166 | ATT&CK techniques/sub-techniques (STIX `attack-pattern`) — id, stix_id, name, description, platforms, sub-technique flag, and (ICS-only) tactic type/impact type/remote support |
+| `x-mitre-detection-strategy` | 920 | Detection strategies — id, stix_id, name |
+| `malware` | 862 | Malware — id, stix_id, name, description, platforms, aliases, `is_family` |
+| `log-source` | 351 | Log sources — id (`log-source--WinEventLog:Security`), name (the bare code). Synthesized from data components' embedded log-source maps; no STIX object of its own, hence no `stix_id` |
+| `intrusion-set` | 193 | Threat groups — id, stix_id, name, description, aliases |
+| `x-mitre-data-component` | 123 | Log data components — id, stix_id, name, description |
+| `attack-mitigation` | 110 | Mitigations (STIX `course-of-action`) — id, stix_id, name, description, compliance-framework labels |
+| `tool` | 97 | Tools — id, stix_id, name, description, platforms, aliases |
+| `campaign` | 60 | Named campaigns — id, stix_id, name, description, aliases, first/last seen dates |
+| `x-mitre-data-source` | 42 | Log data sources — id, stix_id, name, description, collection layers, platforms |
+| `x-mitre-tactic` | 41 | ATT&CK tactics — id, stix_id, name, description |
+| `x-mitre-asset` | 18 | ICS physical/logical assets — id, stix_id, name, description, platforms, sectors |
+| `x-mitre-matrix` | 3 | Matrix groupings — id, stix_id, name, description |
 
-`courses_of_action.json` and `matrices.json` are smaller than a raw object
+`attack-mitigation` and `x-mitre-matrix` are smaller than a raw object
 count would suggest (334→110, 4→3) because of the id-collision deletions
 above, not because of any additional filtering.
 
+### `relationships.json` — 36,346 records
+
+Every record is `type: "relationship"` with id, relationship_type,
+source_ref and target_ref. Three origins share the file: the hyphenated
+`relationship_type`s are ATT&CK's own native STIX edges, the underscored
+ones are derived from embedded id-list fields, and `related-to` is the
+cross-catalog edge — the only one carrying a `source_name`:
+
+| `relationship_type` | Count | Endpoints | Origin |
+|---|---|---|---|
+| `uses` | 19,988 | group/campaign/malware → technique, and more | native |
+| `uses_data_component` | 5,042 | analytic → data-component | derived |
+| `has_log_source` | 3,165 | data-component → log-source | derived |
+| `has_analytic` | 2,066 | detection-strategy → analytic | derived |
+| `mitigates` | 2,017 | mitigation → technique | native |
+| `has_tactic` | 1,446 | technique → tactic | derived |
+| `detects` | 918 | detection-strategy → technique | native |
+| `targets` | 842 | technique → ICS asset | native |
+| `subtechnique-of` | 542 | sub-technique → technique | native |
+| `revoked-by` | 218 | revoked object → its replacement | native |
+| `has_member` | 39 | matrix → tactic | derived |
+| `related-to` | 36 | `T####` → `CAPEC-N` (`source_name: "capec"`) | external |
+| `attributed-to` | 27 | campaign → group | native |
+
 Every entity record carries `id` (its ATT&CK id, or a STIX id fallback —
 see above) and `stix_id` (always the original STIX id, for traceability) —
-except `log_sources.json`, which has no upstream STIX object to trace back
-to. Every relationship file — native, derived, and external alike —
+except the `log-source` records, which have no upstream STIX object to
+trace back to. Every edge — native, derived, and external alike —
 consistently uses these same `id` values as `source_ref`/`target_ref`;
-verified after every run that none of the 24,552 + 11,758 + 36 rows carries
+verified after every run that none of the 36,346 rows carries
 a raw STIX id (`<type>--<uuid>`) in either column, and that every endpoint
 resolves to an entity that exists.

@@ -2,21 +2,26 @@
 
 Merges the three raw STIX 2.1 bundles from the ATT&CK crawler
 (`data-acquisition/mitre-attack/{enterprise,mobile,ics}/latest.json`) into
-one deduplicated set of entity/relationship files, keyed by each entity's
-human-readable ATT&CK code (`T1055`, `S0002`, ...) rather than its STIX id
--- see `resolve_canonical_ids()`. `stix_id` keeps the original STIX id.
+exactly two deduplicated JSON files -- `entities.json` (every technique,
+malware, tool, group, campaign, mitigation, tactic, matrix, analytic,
+detection strategy, data component, data source, asset and log source) and
+`relationships.json` (every edge) -- keyed by each entity's human-readable
+ATT&CK code (`T1055`, `S0002`, ...) rather than its STIX id -- see
+`resolve_canonical_ids()`. `stix_id` keeps the original STIX id. A record's
+own `type` field is what distinguishes the kinds inside each file.
 
 STIX boilerplate types and a few bookkeeping-only fields are dropped (see
-`*_FIELDS`). Embedded id-list fields with no native STIX `relationship`
-object (technique<->tactic, matrix->tactic, detection-strategy->analytic,
-analytic->data-component, data-component->log-source) become
-`derived_relationships.json` edges; native `relationship` objects go to
-`relationships.json` with `source_ref`/`target_ref` rewritten to the same id
-space; CAPEC cross-references go to `external_relationships.json`.
+`*_FIELDS`). Three kinds of edge all land in `relationships.json`: native
+STIX `relationship` objects, with `source_ref`/`target_ref` rewritten into
+the same id space; edges derived from embedded id-list fields that have no
+native `relationship` object (technique<->tactic, matrix->tactic,
+detection-strategy->analytic, analytic->data-component,
+data-component->log-source); and CAPEC cross-references, which carry
+`source_name: "capec"`.
 
 Nothing in the output nests: Neo4j properties hold scalars or scalar arrays,
 never maps. ATT&CK's only two list-of-map fields are unpacked --
-`x_mitre_log_sources` into `log_sources.json` entities plus `has_log_source`
+`x_mitre_log_sources` into `log-source` entities plus `has_log_source`
 edges (see `build_log_source_relationships()`), and analytics'
 `x_mitre_mutable_elements` into two flat string lists (see
 `flatten_mutable_elements()`).
@@ -78,7 +83,7 @@ TOOL_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_platforms", "x_mitre_al
 INTRUSION_SET_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("aliases",)
 CAMPAIGN_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("aliases", "first_seen", "last_seen")
 COURSE_OF_ACTION_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("labels",)
-MATRIX_FIELDS: Tuple[str, ...] = COMMON_FIELDS  # tactic_refs extracted to derived_relationships.json
+MATRIX_FIELDS: Tuple[str, ...] = COMMON_FIELDS  # tactic_refs extracted to derived edges
 ANALYTIC_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_platforms", "x_mitre_mutable_elements")
 DETECTION_STRATEGY_FIELDS: Tuple[str, ...] = COMMON_FIELDS  # x_mitre_analytic_refs extracted
 DATA_COMPONENT_FIELDS: Tuple[str, ...] = COMMON_FIELDS  # x_mitre_log_sources extracted
@@ -148,25 +153,18 @@ ENTITY_TYPE_LABEL_OVERRIDES: Dict[str, str] = {
     "course-of-action": "attack-mitigation",
 }
 
-OUTPUT_FILENAMES: Dict[str, str] = {
-    "attack-pattern": "techniques.json",
-    "malware": "malware.json",
-    "tool": "tools.json",
-    "intrusion-set": "intrusion_sets.json",
-    "campaign": "campaigns.json",
-    "course-of-action": "courses_of_action.json",
-    "x-mitre-tactic": "tactics.json",
-    "x-mitre-matrix": "matrices.json",
-    "x-mitre-analytic": "analytics.json",
-    "x-mitre-detection-strategy": "detection_strategies.json",
-    "x-mitre-data-component": "data_components.json",
-    "x-mitre-data-source": "data_sources.json",
-    "x-mitre-asset": "assets.json",
-    LOG_SOURCE_KEY: "log_sources.json",
-    RELATIONSHIP_KEY: "relationships.json",
-    DERIVED_RELATIONSHIP_KEY: "derived_relationships.json",
-    EXTERNAL_RELATIONSHIP_KEY: "external_relationships.json",
-}
+ENTITIES_FILENAME = "entities.json"
+RELATIONSHIPS_FILENAME = "relationships.json"
+
+# Which `parse()` result keys hold edges; every other key holds entities. The keys
+# themselves stay per-kind so the run summary can still report a breakdown, but they
+# no longer map to a file each -- output is exactly two files, and a record's own
+# `type` field is what distinguishes the kinds inside them.
+RELATIONSHIP_KEYS: Tuple[str, ...] = (
+    RELATIONSHIP_KEY,
+    DERIVED_RELATIONSHIP_KEY,
+    EXTERNAL_RELATIONSHIP_KEY,
+)
 
 
 class ParseError(RuntimeError):
@@ -345,8 +343,9 @@ def build_log_source_relationships(
 
     `name` is a shared vocabulary -- 351 colon-namespaced codes
     (`WinEventLog:Security`, `AWS:CloudTrail`) reused across components -- so it
-    becomes its own entity, which also gives the `log_source_name` already carried
-    on `uses_data_component` edges a real node to resolve against. `channel` is
+    becomes its own entity in `entities.json`, which also gives the `log_source_ref`
+    already carried on `uses_data_component` edges a real node to resolve against.
+    `channel` is
     free-text analyst prose (43% of values run past 60 characters), so it stays an
     edge attribute rather than becoming part of the log source's identity.
     """
@@ -517,17 +516,23 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     return result
 
 
+def write_json(path: Path, records: List[Dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(records, handle, indent=2)
+        handle.write("\n")
+
+
 def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> Dict[str, int]:
+    """Write every entity record to entities.json and every edge to relationships.json,
+    concatenated in `result`'s own insertion order so reruns are byte-stable."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    counts: Dict[str, int] = {}
-    for obj_type, records in result.items():
-        filename = OUTPUT_FILENAMES[obj_type]
-        path = output_dir / filename
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(records, handle, indent=2)
-            handle.write("\n")
-        counts[obj_type] = len(records)
-    return counts
+    entities: List[Dict[str, Any]] = []
+    relationships: List[Dict[str, Any]] = []
+    for key, records in result.items():
+        (relationships if key in RELATIONSHIP_KEYS else entities).extend(records)
+    write_json(output_dir / ENTITIES_FILENAME, entities)
+    write_json(output_dir / RELATIONSHIPS_FILENAME, relationships)
+    return {key: len(records) for key, records in result.items()}
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -544,7 +549,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default=str(default_output_dir),
-        help=f"Directory to write the trimmed entity/relationship files to (default: {default_output_dir})",
+        help=f"Directory to write entities.json / relationships.json (default: {default_output_dir})",
     )
     return parser.parse_args(argv)
 
@@ -558,9 +563,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         objects = load_objects(input_dir)
         result = parse(objects)
         counts = write_outputs(result, output_dir)
+        entity_total = sum(count for key, count in counts.items() if key not in RELATIONSHIP_KEYS)
+        relationship_total = sum(count for key, count in counts.items() if key in RELATIONSHIP_KEYS)
         print(
-            "[mitre-attack-parser] wrote "
-            f"{counts['attack-pattern']} techniques, "
+            f"[mitre-attack-parser] wrote {entity_total} entities to {ENTITIES_FILENAME} "
+            f"({counts['attack-pattern']} techniques, "
             f"{counts['malware']} malware, "
             f"{counts['tool']} tools, "
             f"{counts['intrusion-set']} intrusion sets, "
@@ -573,11 +580,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{counts['x-mitre-data-component']} data components, "
             f"{counts['x-mitre-data-source']} data sources, "
             f"{counts['x-mitre-asset']} assets, "
-            f"{counts[LOG_SOURCE_KEY]} log sources, "
-            f"{counts[RELATIONSHIP_KEY]} relationships, "
-            f"{counts[DERIVED_RELATIONSHIP_KEY]} derived relationships, "
-            f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external relationships "
-            f"to {output_dir}"
+            f"{counts[LOG_SOURCE_KEY]} log sources) and "
+            f"{relationship_total} relationships to {RELATIONSHIPS_FILENAME} "
+            f"({counts[RELATIONSHIP_KEY]} native, "
+            f"{counts[DERIVED_RELATIONSHIP_KEY]} derived, "
+            f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external), "
+            f"in {output_dir}"
         )
         return 0
     except (ParseError, OSError, json.JSONDecodeError) as exc:

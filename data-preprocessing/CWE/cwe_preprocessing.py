@@ -2,24 +2,28 @@
 
 Reads the raw JSON bundle produced by the CWE crawler
 (`data-acquisition/CWE/latest.json`) and writes a fully flattened,
-relationship-linked set of JSON files. CWE's own JSON is a generic
-XML-to-JSON conversion, not native STIX -- every relationship-shaped field
-(`RelatedWeaknesses`, `RelatedAttackPatterns`, `AlternateTerms`,
-`ObservedExamples`, `Relationships.HasMember`, `Members.HasMember`) lives
-inline on the entity record itself, and so does every *attribute*-shaped
-field that itself nests sub-records (`CommonConsequences`,
-`ApplicablePlatforms`, `ModesOfIntroduction`, `PotentialMitigations`,
-`DetectionMethods`). This script extracts all of it into STIX-shaped
-`relationship` records (`id`, `type`, `relationship_type`, `source_ref`,
-`target_ref`, plus relationship-specific attributes) and drops the source
-field from the entity record, so entities and relationships are stored
-completely separately -- mirroring `capec_preprocessing.py`'s own
-`relationships.json` / `external_relationships.json` split.
+relationship-linked pair of JSON files: `entities.json` (weaknesses,
+categories, views, and the sub-record entities promoted out of them) and
+`relationships.json` (every edge). A record's own `type` field is what
+distinguishes the kinds inside each file.
 
-`external_relationships.json` is scoped to CAPEC and CVE only -- other
+CWE's own JSON is a generic XML-to-JSON conversion, not native STIX --
+every relationship-shaped field (`RelatedWeaknesses`,
+`RelatedAttackPatterns`, `AlternateTerms`, `ObservedExamples`,
+`Relationships.HasMember`, `Members.HasMember`) lives inline on the entity
+record itself, and so does every *attribute*-shaped field that itself nests
+sub-records (`CommonConsequences`, `ApplicablePlatforms`,
+`ModesOfIntroduction`, `PotentialMitigations`, `DetectionMethods`). This
+script extracts all of it into STIX-shaped `relationship` records (`id`,
+`type`, `relationship_type`, `source_ref`, `target_ref`, plus
+relationship-specific attributes) and drops the source field from the entity
+record, so entities and relationships are stored completely separately.
+
+Edges pointing outside this bundle are scoped to CAPEC and CVE only -- other
 external taxonomies referenced by `TaxonomyMappings`/`ObservedExamples`
 (7 Pernicious Kingdoms, Software Fault Patterns, OWASP Top Ten, etc.) are
-not extracted.
+not extracted. They live in the same `relationships.json` as the internal
+edges, distinguished by carrying a `source_name`.
 
 ## Sub-records with a reused identity become shared nodes; the rest stay private
 
@@ -70,13 +74,13 @@ to one plain-text string: paragraphs join with a blank line, list items
 simplification, the underlying order of items is), and the `style`
 attribute some `div` nodes carry (raw CSS, e.g. `"margin-left:1em;"`) is
 dropped as pure formatting noise with no content of its own. Same
-treatment for `views.json`'s `Objective`.
+treatment for a view record's `Objective`.
 
 `AffectedResources`/`FunctionalAreas` (each wrapping a single-key list,
 `{"AffectedResource": [...]}` -- a cardinality-1-collapse artifact of CWE's
 XML-to-JSON conversion, the same quirk `as_list()` already exists to
 normalize) are unwrapped to a plain `AffectedResources: [...]` /
-`FunctionalAreas: [...]` array. `views.json`'s `Audience.Stakeholder` (a
+`FunctionalAreas: [...]` array. A view record's `Audience.Stakeholder` (a
 list of `{Type, Description}` pairs, only 10 distinct `Type` values) is
 unwrapped the same way to a plain `Audience: [...]` array of stakeholder
 type names; the per-view `Description` text is dropped.
@@ -122,8 +126,8 @@ FIELDS_BY_TYPE: Dict[str, Tuple[str, ...]] = {
 
 # relationship_type used for every edge pointing outside this bundle (CAPEC,
 # CVE/REF, external taxonomies) -- source_name on the record disambiguates
-# which external system, same convention capec_preprocessing.py uses for its
-# own external_relationships.json.
+# which external system, the same convention capec_preprocessing.py uses for
+# its own outward-pointing edges.
 EXTERNAL_RELATIONSHIP_TYPE = "related-to"
 
 # RelatedWeakness Nature -> relationship_type. CWE's own data only ever
@@ -188,18 +192,14 @@ SUB_ENTITY_TYPES: Tuple[str, ...] = (
     DETECTION_METHOD_ENTITY_TYPE,
 )
 
-OUTPUT_FILENAMES: Dict[str, str] = {
-    "weakness": "weaknesses.json",
-    "category": "categories.json",
-    "view": "views.json",
-    RELATIONSHIP_KEY: "relationships.json",
-    EXTERNAL_RELATIONSHIP_KEY: "external_relationships.json",
-    CONSEQUENCE_ENTITY_TYPE: "consequences.json",
-    PLATFORM_ENTITY_TYPE: "platforms.json",
-    INTRODUCTION_ENTITY_TYPE: "introductions.json",
-    MITIGATION_ENTITY_TYPE: "mitigations.json",
-    DETECTION_METHOD_ENTITY_TYPE: "detection_methods.json",
-}
+ENTITIES_FILENAME = "entities.json"
+RELATIONSHIPS_FILENAME = "relationships.json"
+
+# Which `parse()` result keys hold edges; every other key holds entities. The keys
+# themselves stay per-kind so the run summary can still report a breakdown, but they
+# no longer map to a file each -- output is exactly two files, and a record's own
+# `type` field is what distinguishes the kinds inside them.
+RELATIONSHIP_KEYS: Tuple[str, ...] = (RELATIONSHIP_KEY, EXTERNAL_RELATIONSHIP_KEY)
 
 # XHTML tag keys that carry no text content of their own.
 XHTML_IGNORED_TAGS = {"style", "br"}
@@ -450,7 +450,7 @@ def build_related_attack_pattern_relationships(obj: Dict[str, Any]) -> List[Dict
 
 def build_observed_example_relationships(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
     """CVE-only: ObservedExample references that aren't a CVE ID (plain `ref`)
-    are dropped, since external_relationships.json is scoped to CVE/CAPEC."""
+    are dropped, since outward-pointing edges are scoped to CVE/CAPEC."""
     source_ref = f"CWE-{obj['cwe_id']}"
     relationships = []
     for item in as_list(obj.get("ObservedExamples", {}).get("ObservedExample")):
@@ -674,17 +674,23 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     return result
 
 
+def write_json(path: Path, records: List[Dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(records, handle, indent=2)
+        handle.write("\n")
+
+
 def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> Dict[str, int]:
+    """Write every entity record to entities.json and every edge to relationships.json,
+    concatenated in `result`'s own insertion order so reruns are byte-stable."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    counts: Dict[str, int] = {}
-    for obj_type, records in result.items():
-        filename = OUTPUT_FILENAMES[obj_type]
-        path = output_dir / filename
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(records, handle, indent=2)
-            handle.write("\n")
-        counts[obj_type] = len(records)
-    return counts
+    entities: List[Dict[str, Any]] = []
+    relationships: List[Dict[str, Any]] = []
+    for key, records in result.items():
+        (relationships if key in RELATIONSHIP_KEYS else entities).extend(records)
+    write_json(output_dir / ENTITIES_FILENAME, entities)
+    write_json(output_dir / RELATIONSHIPS_FILENAME, relationships)
+    return {key: len(records) for key, records in result.items()}
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -701,12 +707,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default=str(default_output_dir),
-        help=(
-            "Directory to write weaknesses.json / categories.json / views.json / "
-            "relationships.json / external_relationships.json / consequences.json / "
-            "platforms.json / introductions.json / mitigations.json / "
-            f"detection_methods.json (default: {default_output_dir})"
-        ),
+        help=f"Directory to write entities.json / relationships.json (default: {default_output_dir})",
     )
     return parser.parse_args(argv)
 
@@ -720,19 +721,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         objects = load_objects(input_path)
         result = parse(objects)
         counts = write_outputs(result, output_dir)
+        entity_total = sum(count for key, count in counts.items() if key not in RELATIONSHIP_KEYS)
+        relationship_total = sum(count for key, count in counts.items() if key in RELATIONSHIP_KEYS)
         print(
-            "[cwe-parser] wrote "
-            f"{counts['weakness']} weaknesses, "
+            f"[cwe-parser] wrote {entity_total} entities to {ENTITIES_FILENAME} "
+            f"({counts['weakness']} weaknesses, "
             f"{counts['category']} categories, "
             f"{counts['view']} views, "
             f"{counts[CONSEQUENCE_ENTITY_TYPE]} consequences, "
             f"{counts[PLATFORM_ENTITY_TYPE]} platforms, "
             f"{counts[INTRODUCTION_ENTITY_TYPE]} introductions, "
             f"{counts[MITIGATION_ENTITY_TYPE]} mitigations, "
-            f"{counts[DETECTION_METHOD_ENTITY_TYPE]} detection methods, "
-            f"{counts[RELATIONSHIP_KEY]} relationships, "
-            f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external relationships "
-            f"to {output_dir}"
+            f"{counts[DETECTION_METHOD_ENTITY_TYPE]} detection methods) and "
+            f"{relationship_total} relationships to {RELATIONSHIPS_FILENAME} "
+            f"({counts[RELATIONSHIP_KEY]} internal, "
+            f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external), "
+            f"in {output_dir}"
         )
         return 0
     except (ParseError, OSError, json.JSONDecodeError) as exc:

@@ -2,23 +2,27 @@
 
 Reads the raw STIX 2.1 bundles produced by the CVE crawler
 (`data-acquisition/CVE/records/<year>/latest.json`, one bundle per year) and
-writes a fully flattened, relationship-linked set of JSON files. Unlike
-CWE/CAPEC, the CVE crawler shards its output by year rather than writing one
-combined `latest.json`, so this script reads every `records/<year>/latest.json`
-and combines them into a single set of outputs.
+writes exactly two flattened JSON files: `entities.json` (the
+vulnerabilities) and `relationships.json` (their CWE classifications).
+Unlike CWE/CAPEC, the CVE crawler shards its output by year rather than
+writing one combined `latest.json`, so this script reads every
+`records/<year>/latest.json` and combines them into a single pair of
+outputs.
 
 Every object in these bundles is a STIX `vulnerability` record built by
-`cve_to_stix()` in `data-acquisition/CVE/client.py`.
+`cve_to_stix()` in `data-acquisition/CVE/client.py`, so `entities.json` is
+uniformly `type: "vulnerability"` -- this is the one source in the project
+whose entity file holds a single kind.
 
 ## Id: the CVE name, not the STIX id
 
-`vulnerabilities.json` records are keyed by their CVE id (`name`, e.g.
+Vulnerability records are keyed by their CVE id (`name`, e.g.
 `"CVE-1999-0001"`) -- the same convention CAPEC uses for its own `CAPEC-N`
 ids -- not by the STIX `vulnerability--<uuid>` id the raw bundle assigns.
 The original STIX id is kept alongside as `stix_id`; the now-redundant
 `name` field itself is dropped (same call as CAPEC dropping its redundant
 `capec_id` once `id` became `CAPEC-N`). No relationship in this dataset
-ever referenced the STIX id in the first place -- `external_relationships.json`
+ever referenced the STIX id in the first place -- the extracted edges
 already keyed off `name` -- so this is a pure rename, not a rewrite of any
 edge.
 
@@ -42,7 +46,7 @@ edge.
   vulnerability data worth preprocessing.
 
 `x_nvd_weaknesses` (the CVE's CWE classification) is extracted into
-`external_relationships.json` as `CVE-N --related-to--> CWE-N` edges, the
+`relationships.json` as `CVE-N --related-to--> CWE-N` edges, the
 reverse direction of CWE's own `CWE-N --related-to--> CVE-N` edges (from
 `RelatedWeaknesses`/`ObservedExamples` in `cwe_preprocessing.py`). Only real
 `CWE-N` ids are extracted; NVD-only fallback labels (`NVD-CWE-noinfo`,
@@ -56,7 +60,7 @@ or kept as an attribute.
 `ssvcV203`), each a *list* of scored assessments, each of which nests its
 own `cvssData`/`ssvcData` object one level deeper.
 
-An earlier pass unnested all five into their own entity files plus
+An earlier pass unnested all five into their own entity records plus
 `has_cvss_v*_score` / `has_ssvc_assessment` edges. That cost one node and one
 edge per assessment -- 593,945 of each against 346,947 vulnerabilities, so
 severity was roughly two thirds of the loaded graph -- to model something the
@@ -276,10 +280,14 @@ SSVC_PREFIX = "ssvc_"
 # `version`, `timestamp`) is scoring-process metadata, not a fact about the CVE.
 SSVC_KEPT_FIELDS: Tuple[str, ...] = ("exploitation", "automatable", "technical_impact")
 
-OUTPUT_FILENAMES: Dict[str, str] = {
-    "vulnerability": "vulnerabilities.json",
-    EXTERNAL_RELATIONSHIP_KEY: "external_relationships.json",
-}
+ENTITIES_FILENAME = "entities.json"
+RELATIONSHIPS_FILENAME = "relationships.json"
+
+# Which `parse()` result keys hold edges; every other key holds entities. The keys
+# themselves stay per-kind so the run summary can still report a breakdown, but they
+# no longer map to a file each -- output is exactly two files, and a record's own
+# `type` field is what distinguishes the kinds inside them.
+RELATIONSHIP_KEYS: Tuple[str, ...] = (EXTERNAL_RELATIONSHIP_KEY,)
 
 
 class ParseError(RuntimeError):
@@ -501,17 +509,23 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     return result
 
 
+def write_json(path: Path, records: List[Dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(records, handle, indent=2)
+        handle.write("\n")
+
+
 def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> Dict[str, int]:
+    """Write every entity record to entities.json and every edge to relationships.json,
+    concatenated in `result`'s own insertion order so reruns are byte-stable."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    counts: Dict[str, int] = {}
-    for obj_type, records in result.items():
-        filename = OUTPUT_FILENAMES[obj_type]
-        path = output_dir / filename
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(records, handle, indent=2)
-            handle.write("\n")
-        counts[obj_type] = len(records)
-    return counts
+    entities: List[Dict[str, Any]] = []
+    relationships: List[Dict[str, Any]] = []
+    for key, records in result.items():
+        (relationships if key in RELATIONSHIP_KEYS else entities).extend(records)
+    write_json(output_dir / ENTITIES_FILENAME, entities)
+    write_json(output_dir / RELATIONSHIPS_FILENAME, relationships)
+    return {key: len(records) for key, records in result.items()}
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -528,10 +542,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default=str(default_output_dir),
-        help=(
-            "Directory to write vulnerabilities.json / external_relationships.json "
-            f"(default: {default_output_dir})"
-        ),
+        help=f"Directory to write entities.json / relationships.json (default: {default_output_dir})",
     )
     return parser.parse_args(argv)
 
@@ -546,10 +557,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = parse(objects)
         counts = write_outputs(result, output_dir)
         print(
-            "[cve-parser] wrote "
-            f"{counts['vulnerability']} vulnerabilities, "
-            f"{counts[EXTERNAL_RELATIONSHIP_KEY]} external relationships "
-            f"to {output_dir}"
+            f"[cve-parser] wrote {counts['vulnerability']} entities to {ENTITIES_FILENAME} "
+            f"(all vulnerabilities) and "
+            f"{counts[EXTERNAL_RELATIONSHIP_KEY]} relationships to {RELATIONSHIPS_FILENAME} "
+            f"(all external, to CWE), "
+            f"in {output_dir}"
         )
         return 0
     except (ParseError, OSError, json.JSONDecodeError) as exc:

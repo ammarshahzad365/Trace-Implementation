@@ -2,13 +2,15 @@
 
 Each module (CWE, CAPEC, CVE, mitre-attack, mitre-defend) is a fully
 independent script that reads its own domain's raw data from
-`data-acquisition/` and writes its own trimmed output into its own
-subfolder here -- this script doesn't import or share any state between
-them, it just runs each one's `main()` in a subprocess (via `sys.executable`,
-so it's the same interpreter/venv this script itself is run with) and
-reports a pass/fail summary at the end. Every module computes its own
-default `--input`/`--output-dir` from its own file location, so this works
-regardless of the current working directory.
+`data-acquisition/` and writes exactly two files into its own subfolder
+here -- `entities.json` and `relationships.json`, ten files in total across
+the five modules. Each record's own `type` field distinguishes the kinds
+inside those two files. This script doesn't import or share any state
+between the modules, it just runs each one's `main()` in a subprocess (via
+`sys.executable`, so it's the same interpreter/venv this script itself is
+run with) and reports a pass/fail summary at the end. Every module computes
+its own default `--input`/`--output-dir` from its own file location, so
+this works regardless of the current working directory.
 
 Usage:
 

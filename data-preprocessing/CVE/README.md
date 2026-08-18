@@ -1,7 +1,8 @@
 # CVE Preprocessing
 
 Reads the raw CVE data (`data-acquisition/CVE/records/<year>/latest.json`,
-one file per year) and writes two clean output files.
+one file per year) and writes two clean output files: `entities.json` and
+`relationships.json`.
 
 ## Usage
 
@@ -14,10 +15,15 @@ this folder).
 
 ## Output
 
-| File | Count | What's in it |
-|---|---|---|
-| `vulnerabilities.json` | 346,947 | One entry per CVE — description, dates, status, plus its severity scores |
-| `external_relationships.json` | 323,027 | `CVE --related-to--> CWE` links, one per weakness type a CVE is classified under |
+| File | Count | `type` | What's in it |
+|---|---|---|---|
+| `entities.json` | 359,355 | `vulnerability` | One entry per CVE — description, dates, status, plus its severity scores |
+| `relationships.json` | 336,339 | `relationship` | `CVE --related-to--> CWE` links (`source_name: "cwe"`), one per weakness type a CVE is classified under |
+
+This is the one source in the project whose two files each hold a single
+kind — every raw object is a STIX `vulnerability`, and its only extracted
+edge is the CWE classification. The `type` field is still written on every
+record, so the files have the same shape as the other four sources'.
 
 ## What it keeps
 
@@ -60,7 +66,7 @@ A CVE can be scored more than once (NVD, plus sometimes a vendor). One
 If scorers disagreed, that's not thrown away — `cvss_assessment_count` says
 how many different scores were given, and `cvss_base_score_min` /
 `cvss_base_score_max` shows the spread. Both are added only when there's
-actually a disagreement (49,236 CVEs, 14.2%).
+actually a disagreement (51,762 CVEs, 14.4%).
 
 For SSVC, if a CVE has more than one rating, the newest one wins.
 
@@ -68,7 +74,7 @@ For SSVC, if a CVE has more than one rating, the newest one wins.
 
 - Fields that are just a calculation from other fields already kept (e.g. a
   severity word that's derivable from the score) — recomputable, so removed.
-- Rejected/empty CVE records (17,655) — no real data in them.
+- Rejected/empty CVE records (17,958) — no real data in them.
 - Reference/bibliography links — they don't point at anything else in this
   dataset.
 - CPE "which software versions are affected" data — it's a deeply nested

@@ -34,7 +34,7 @@ defensive techniques through the complete five-catalog trace.
 | Stage | Folder | What it does | Run it with |
 |---|---|---|---|
 | **1. Acquire** | [`data-acquisition/`](data-acquisition/) | Crawls CVE, CWE, CAPEC, ATT&CK and D3FEND from upstream into a consistent, diffable local snapshot | `py -m full_crawler` |
-| **2. Preprocess** | [`data-preprocessing/`](data-preprocessing/) | Flattens each source to graph-ready JSON: entity files + relationship files, nothing nested, human-readable ids | `py main.py` |
+| **2. Preprocess** | [`data-preprocessing/`](data-preprocessing/) | Flattens each source to graph-ready JSON: one entity file + one relationship file per source, nothing nested, human-readable ids | `py main.py` |
 | **3. Load** | [`data-loading/`](data-loading/) | Loads it all into Neo4j — labels, typed relationships, cross-catalog dedupe, validation | `py main.py` |
 | **4. Query** | [`data-loading/queries.cypher`](data-loading/queries.cypher) | ~20 starter queries, headed by the trace above | Neo4j Browser |
 
@@ -85,10 +85,14 @@ py main.py                      # all five sources
 py main.py --only cwe capec     # or a subset
 ```
 
-Produces 44 JSON files across five folders. Every record is flat (no nested maps
-— Neo4j can't store them), every id is human-readable (`CVE-2021-44228`, `CWE-79`,
-`T1055`), and relationships live in their own files rather than embedded on
-entities. Each source folder has a README explaining every field decision.
+Produces exactly 10 JSON files: an `entities.json` and a `relationships.json`
+in each of the five source folders. Every record is flat (no nested maps — Neo4j
+can't store them), every id is human-readable (`CVE-2021-44228`, `CWE-79`,
+`T1055`), and relationships live in their own file rather than embedded on
+entities. Within a file, each record's own `type` field says what kind it is
+(`weakness`, `attack-technique`, `vulnerability`, …), so no further files are
+needed to tell the kinds apart. Each source folder has a README explaining every
+field decision.
 
 ### 3. Load into Neo4j
 
@@ -162,7 +166,8 @@ data-acquisition/        stage 1 — five crawlers + a top-level orchestrator
 
 data-preprocessing/      stage 2 — five preprocessors + orchestrator
   main.py                runs all five
-  <SOURCE>/              <source>_preprocessing.py, output JSON, README.md
+  <SOURCE>/              <source>_preprocessing.py, entities.json,
+                         relationships.json, README.md
 
 data-loading/            stage 3 — the Neo4j loader
   main.py                orchestrator: --stage, --only, --dry-run, --check
