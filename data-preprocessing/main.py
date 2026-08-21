@@ -50,7 +50,7 @@ def selected_modules(args: argparse.Namespace) -> List[Tuple[str, str, str]]:
     return [m for m in chosen if m[0] not in args.skip]
 
 
-def run_module(key: str, relative_path: str, label: str) -> Tuple[bool, float]:
+def run_module(relative_path: str, label: str) -> Tuple[bool, float]:
     script_path = SCRIPT_DIR / relative_path
     print(f"\n=== {label} ({relative_path}) ===", flush=True)
     started = time.monotonic()
@@ -68,8 +68,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     results: List[Tuple[str, bool, float]] = []
-    for key, relative_path, label in modules:
-        ok, elapsed = run_module(key, relative_path, label)
+    for _key, relative_path, label in modules:
+        ok, elapsed = run_module(relative_path, label)
         results.append((label, ok, elapsed))
 
     print("\n=== Summary ===")

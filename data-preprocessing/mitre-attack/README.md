@@ -76,7 +76,7 @@ every endpoint resolves.
   two catalogs in the whole project, merging two catalogs' distinct entities under
   one Neo4j label.
 - `external_references` is never kept verbatim beyond that id extraction: `capec`
-  entries become `T#### --related-to--> CAPEC-N` edges carrying
+  entries become `T#### --related_to--> CAPEC-N` edges carrying
   `source_name: "capec"` (the reverse of CAPEC's own), and every other entry is a
   bibliographic citation with no local entity, dropped with the field — the same
   treatment CWE gives `References`/`Notes`.
@@ -85,7 +85,7 @@ every endpoint resolves.
 - `revoked`/`x_mitre_deprecated` objects are **kept** (unlike CVE's `Rejected`
   records, and unlike the 226 collision-losers, which are dropped for being a
   duplicate id, not for being revoked): both flags become attributes instead,
-  since ATT&CK's own `revoked-by` edges point *at* revoked objects and dropping
+  since ATT&CK's own `revoked_by` edges point *at* revoked objects and dropping
   them would leave those edges dangling.
 - `malware`/`tool` spell their alias list `x_mitre_aliases` where
   `intrusion-set`/`campaign` use STIX's `aliases`; output unifies both on
@@ -119,9 +119,12 @@ every endpoint resolves.
   don't match any other asset's `name` at all — e.g. `Application Server` →
   `File Server`), not another asset by id, so there's nothing to resolve.
 - Native `relationship` objects (`uses`, `mitigates`, `detects`,
-  `subtechnique-of`, `revoked-by`, `attributed-to`, `targets`) are kept, with
+  `subtechnique_of`, `revoked_by`, `attributed_to`, `targets`) are kept, with
   their endpoints rewritten through the same id resolution, so every edge here
-  joins on one id space. `revoked`/`x_mitre_deprecated` are dropped from edges
+  joins on one id space. STIX spells three of those types with a hyphen
+  (`subtechnique-of`, `revoked-by`, `attributed-to`); they are rewritten to
+  snake_case to match every derived type, since a hyphen has to be
+  backtick-quoted as a Neo4j relationship type. `revoked`/`x_mitre_deprecated` are dropped from edges
   specifically — verified always false/absent across all 24,582.
   `external_references` go for the usual bibliography reason; `description` is
   kept, since unlike CWE/CAPEC edges ATT&CK's carry real analytic content (*how*
@@ -140,14 +143,17 @@ mean different things:
 
 - **`x-mitre-data-component.x_mitre_log_sources`** (3,165 `{name, channel}` maps
   across 114 of 123 components) → **`log-source` entities plus `has_log_source`
-  edges.** `name` is a genuine shared vocabulary — 351 colon-namespaced codes
+  edges.** `name` is a genuine shared vocabulary — 348 mostly colon-namespaced codes
   (`WinEventLog:Security`, `AWS:CloudTrail`, `macos:unifiedlog`) reused across
   components — so it earns its own type. That also fixes a modelling gap: the log
   source already carried on 5,042 `uses_data_component` edges was a bare string
   with no node behind it, and is now a `log_source_ref` resolving to a real entity
-  (all 309 names used there are among the 351; 0 dangling). A log source's `id` is
+  (all 307 names used there are among the 348; 0 dangling). Names are trimmed
+  before they key an entity: three upstream names carry a trailing space
+  (`"networkconfig "`), which would otherwise split each into a second node
+  alongside its trimmed twin. A log source's `id` is
   its name prefixed with its type (`log-source--AWS:CloudTrail`), because 7 of the
-  351 are bare words (`File`, `Process`, `Network`, `Command`, `Certificate`,
+  348 are bare words (`File`, `Process`, `Network`, `Command`, `Certificate`,
   `Firmware`, `Metadata`) that D3FEND also uses as artifact ids — unprefixed
   they'd be the only ids in the project claimed by two catalogs. The bare name
   stays as `name`. `channel` stays an *edge* attribute rather than joining the
@@ -175,11 +181,36 @@ pollutes any `channel` filter, so `clean_channel()` treats `"None"`/blank as
 "attribute absent" on both edge types — 84 and 521 edges respectively now simply
 have no `channel` key.
 
+## Every string is normalized on the way out
+
+`clean_record()` runs over every entity and every edge in `write_outputs()`, so
+no builder has to remember to tidy up after itself. Per string it: converts CRLF
+and lone CR to LF; turns non-breaking spaces, tabs and other exotic space
+characters into a plain space; collapses runs of horizontal whitespace; trims
+every line; and collapses three or more newlines to a blank line. Blank-line
+paragraph breaks survive — they carry meaning — but the indentation the source
+document was pretty-printed with does not. A string left empty is dropped rather
+than written as `""`, and list values are deduplicated.
+
+ATT&CK writes a literal `"None"` string (not JSON null) where a field doesn't
+apply — 184 log-source `channel` values and 179 `x_mitre_platforms` entries — and
+those are dropped, leaving the property absent. Descriptions keep their native
+markdown and the inline `<code>` tags ATT&CK writes them with: unlike CAPEC's
+XHTML wrapper, that markup marks up *which part of the prose is a literal*
+(a path, a command), so flattening it would lose information rather than noise.
+
+Two things are deliberately *not* touched. Markup that is quoted **content**
+stays verbatim — XSS payloads, SOAP envelopes, C includes and `<a>`/`<script>`
+samples appear inside these descriptions as the thing being described, and
+stripping them would destroy the text. And a lone newline is only collapsed into
+a space where the source is known to hard-wrap its text; elsewhere it is a real
+line break and is kept.
+
 ## Output
 
 Two JSON files, each a plain array of records.
 
-### `entities.json` — 6,052 records
+### `entities.json` — 6,049 records
 
 | `type` | Count | Contents |
 |---|---|---|
@@ -187,7 +218,7 @@ Two JSON files, each a plain array of records.
 | `attack-technique` | 1,166 | Techniques/sub-techniques (STIX `attack-pattern`) — id, stix_id, name, description, platforms, sub-technique flag, and (ICS-only) tactic type/impact type/remote support |
 | `x-mitre-detection-strategy` | 920 | Detection strategies — id, stix_id, name |
 | `malware` | 862 | Malware — id, stix_id, name, description, platforms, aliases, `is_family` |
-| `log-source` | 351 | Log sources — id (`log-source--WinEventLog:Security`), name. Synthesized from data components' embedded maps; no STIX object of its own, hence no `stix_id` |
+| `log-source` | 348 | Log sources — id (`log-source--WinEventLog:Security`), name. Synthesized from data components' embedded maps; no STIX object of its own, hence no `stix_id` |
 | `intrusion-set` | 193 | Threat groups — id, stix_id, name, description, aliases |
 | `x-mitre-data-component` | 123 | Log data components — id, stix_id, name, description |
 | `attack-mitigation` | 110 | Mitigations (STIX `course-of-action`) — id, stix_id, name, description, compliance-framework labels |
@@ -205,10 +236,11 @@ additional filtering.
 ### `relationships.json` — 36,346 records
 
 Every record is `type: "relationship"` with id, relationship_type, source_ref and
-target_ref. Three origins share the file: hyphenated `relationship_type`s are
-ATT&CK's native STIX edges, underscored ones are derived from embedded id-list
-fields, and `related-to` is the cross-catalog edge — the only one carrying
-`source_name`:
+target_ref. Three origins share the file — ATT&CK's native STIX edges, edges
+derived from embedded id-list fields, and `related_to`, the cross-catalog edge
+and the only one carrying `source_name`. The `Origin` column below says which is
+which; the name alone no longer does, since every `relationship_type` is
+snake_case (see below):
 
 | `relationship_type` | Count | Endpoints | Origin |
 |---|---|---|---|
@@ -220,11 +252,11 @@ fields, and `related-to` is the cross-catalog edge — the only one carrying
 | `has_tactic` | 1,446 | technique → tactic | derived |
 | `detects` | 918 | detection-strategy → technique | native |
 | `targets` | 842 | technique → ICS asset | native |
-| `subtechnique-of` | 542 | sub-technique → technique | native |
-| `revoked-by` | 218 | revoked object → its replacement | native |
+| `subtechnique_of` | 542 | sub-technique → technique | native |
+| `revoked_by` | 218 | revoked object → its replacement | native |
 | `has_member` | 39 | matrix → tactic | derived |
-| `related-to` | 36 | `T####` → `CAPEC-N` (`source_name: "capec"`) | external |
-| `attributed-to` | 27 | campaign → group | native |
+| `related_to` | 36 | `T####` → `CAPEC-N` (`source_name: "capec"`) | external |
+| `attributed_to` | 27 | campaign → group | native |
 
 Every entity carries `id` and `stix_id` (except `log-source`, which has no
 upstream STIX object to trace back to), and every edge — native, derived and

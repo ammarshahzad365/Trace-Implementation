@@ -12,12 +12,30 @@ py cve_preprocessing.py
 Optional flags: `--input` (raw records folder) and `--output-dir` (default: this
 folder).
 
+## Every string is normalized on the way out
+
+`clean_record()` runs over every entity and every edge in `write_outputs()`, so
+no builder has to remember to tidy up after itself. Per string it: converts CRLF
+and lone CR to LF; turns non-breaking spaces, tabs and other exotic space
+characters into a plain space; collapses runs of horizontal whitespace; trims
+every line; and collapses three or more newlines to a blank line. Blank-line
+paragraph breaks survive — they carry meaning — but the indentation the source
+document was pretty-printed with does not. A string left empty is dropped rather
+than written as `""`, and list values are deduplicated.
+
+Two things are deliberately *not* touched. Markup that is quoted **content**
+stays verbatim — XSS payloads, SOAP envelopes, C includes and `<a>`/`<script>`
+samples appear inside these descriptions as the thing being described, and
+stripping them would destroy the text. And a lone newline is only collapsed into
+a space where the source is known to hard-wrap its text; elsewhere it is a real
+line break and is kept.
+
 ## Output
 
 | File | Count | `type` | What's in it |
 |---|---|---|---|
 | `entities.json` | 359,355 | `vulnerability` | One entry per CVE — description, dates, status, plus its severity scores |
-| `relationships.json` | 336,339 | `relationship` | `CVE --related-to--> CWE` links (`source_name: "cwe"`), one per weakness type a CVE is classified under |
+| `relationships.json` | 336,339 | `relationship` | `CVE --related_to--> CWE` links (`source_name: "cwe"`), one per weakness type a CVE is classified under |
 
 This is the one source whose two files each hold a single kind — every raw object
 is a STIX `vulnerability`, and its only extracted edge is the CWE classification.

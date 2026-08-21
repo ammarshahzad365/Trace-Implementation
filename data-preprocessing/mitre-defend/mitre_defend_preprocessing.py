@@ -38,6 +38,12 @@ Edges come from the entity domains' own ref fields (`has_subclass`, `child_of`,
 `technique --{relation}--> artifact`, `technique --enables--> tactic`,
 `offensive-technique --{relation}--> artifact`, and the dataset's headline fact,
 `technique --counters--> offensive-technique`.
+
+Every string is normalized on the way out by `clean_record()`: CRLF to LF,
+non-breaking spaces and tabs to plain spaces, horizontal whitespace runs
+collapsed, lines trimmed, empty values and duplicate list entries dropped.
+Blank-line paragraph breaks survive; source-document indentation does not.
+Markup that is quoted content (payloads, code samples) is left verbatim.
 """
 
 from __future__ import annotations
@@ -81,6 +87,17 @@ WEAKNESS_REF_FIELDS: Tuple[Tuple[str, str], ...] = (
 
 DEFINITION_SEPARATOR = "\n\n"
 
+# Upstream free text carries CRLF endings, non-breaking spaces, tabs and the indentation
+# of the document it was serialized from. None of it is content, all of it lands verbatim
+# in a Neo4j property and breaks string matching, so `clean_text()` normalizes it away.
+COLLAPSIBLE_SPACE_PATTERN = re.compile(r"[\u00a0\u2007\u202f\ufeff\t]")
+HORIZONTAL_RUN_PATTERN = re.compile(r"[^\S\n]{2,}")
+BLANK_LINE_RUN_PATTERN = re.compile(r"\n{3,}")
+SOFT_WRAP_PATTERN = re.compile(r"(?<!\n)\n(?!\n)")
+
+# D3FEND has no absent-value marker string of its own; an unset field is simply missing.
+ABSENT_VALUE_SENTINELS: frozenset = frozenset()
+
 ENTITIES_FILENAME = "entities.json"
 RELATIONSHIPS_FILENAME = "relationships.json"
 
@@ -91,6 +108,43 @@ RELATIONSHIP_KEYS: Tuple[str, ...] = ("relationship",)
 
 class ParseError(RuntimeError):
     pass
+
+
+def clean_text(value: str, unwrap: bool = False) -> str:
+    """Normalize one free-text string: CRLF/CR to LF, non-breaking and other exotic
+    spaces plus tabs to a plain space, runs of horizontal whitespace collapsed, every
+    line trimmed. Blank-line paragraph breaks are preserved; with `unwrap`, a lone
+    newline is treated as source-indentation wrapping and becomes a space."""
+    text = value.replace("\r\n", "\n").replace("\r", "\n")
+    text = COLLAPSIBLE_SPACE_PATTERN.sub(" ", text)
+    text = HORIZONTAL_RUN_PATTERN.sub(" ", text)
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    if unwrap:
+        text = SOFT_WRAP_PATTERN.sub(" ", text)
+    return BLANK_LINE_RUN_PATTERN.sub("\n\n", text).strip()
+
+
+def clean_value(value: Any) -> Any:
+    """Normalize every string in a property value, dropping the ones left empty or equal
+    to a sentinel, and deduping list values."""
+    if isinstance(value, str):
+        text = clean_text(value)
+        return None if not text or text in ABSENT_VALUE_SENTINELS else text
+    if isinstance(value, list):
+        kept = [item for item in map(clean_value, value) if item is not None]
+        return list(dict.fromkeys(kept)) or None
+    return value
+
+
+def clean_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Run every property through `clean_value`, dropping those left empty. Applied once
+    per record on the way out, so no builder has to remember to trim or dedupe itself."""
+    cleaned: Dict[str, Any] = {}
+    for key, value in record.items():
+        value = clean_value(value)
+        if value is not None:
+            cleaned[key] = value
+    return cleaned
 
 
 def load_domain(input_dir: Path, domain: str) -> List[Dict[str, Any]]:
@@ -309,7 +363,8 @@ def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> 
     output_dir.mkdir(parents=True, exist_ok=True)
     files: Dict[str, List[Dict[str, Any]]] = {ENTITIES_FILENAME: [], RELATIONSHIPS_FILENAME: []}
     for key, records in result.items():
-        files[RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME].extend(records)
+        target = RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME
+        files[target].extend(clean_record(record) for record in records)
     for filename, records in files.items():
         with (output_dir / filename).open("w", encoding="utf-8") as handle:
             json.dump(records, handle, indent=2)

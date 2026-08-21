@@ -42,8 +42,10 @@ index-aligned second list, since Cypher can't enforce alignment.
 
 - Keeps `weakness`, `category` and `view`, each reduced to a whitelist
   (`*_FIELDS` in the script). A missing field is omitted, not written as `null`.
-- Drops the redundant `ID` (duplicate of `cwe_id`) and `MappingNotes` from every
-  record; `References`, `Notes`, `Diagram` and `DemonstrativeExamples` from
+- Drops the redundant `ID` and `cwe_id` (both spell the record's own `id`:
+  `CWE-5` carries `ID: "CWE-5"` and `cwe_id: "5"`, so as properties they only
+  duplicate the key — the raw `cwe_id` is still read to build edge endpoints) and
+  `MappingNotes` from every record; `References`, `Notes`, `Diagram` and `DemonstrativeExamples` from
   `weakness`; `References`/`Notes` from `category`; `References`/`Notes`/`Filter`
   from `view` — bibliographic citations, free-text notes, an image path, and
   semi-HTML example markup, none with an extractable entity or edge here (CWE's
@@ -58,9 +60,9 @@ index-aligned second list, since Cypher can't enforce alignment.
     one-directional edges rather than remove redundancy.
   - `category.Relationships.HasMember` / `view.Members.HasMember` → `has_member`
     edges to each member weakness, with `view_id` as an edge attribute.
-  - `weakness.RelatedAttackPatterns` → `CWE-N --related-to--> CAPEC-N`
+  - `weakness.RelatedAttackPatterns` → `CWE-N --related_to--> CAPEC-N`
     (`source_name: "capec"`), the reverse of CAPEC's own edges.
-  - `weakness.ObservedExamples` → `CWE-N --related-to--> CVE-N`
+  - `weakness.ObservedExamples` → `CWE-N --related_to--> CVE-N`
     (`source_name: "cve"`), with `description`/`link` as edge attributes.
     References that are a bare bibliography id (`[REF-1374]`) are dropped, since
     outward edges are scoped to CVE/CAPEC only.
@@ -144,6 +146,32 @@ arrays. `view.Audience.Stakeholder` (a list of `{Type, Description}` pairs, only
 10 distinct `Type`s) is unwrapped the same way to an array of stakeholder types;
 the per-view `Description` is dropped.
 
+## Every string is normalized on the way out
+
+`clean_record()` runs over every entity and every edge in `write_outputs()`, so
+no builder has to remember to tidy up after itself. Per string it: converts CRLF
+and lone CR to LF; turns non-breaking spaces, tabs and other exotic space
+characters into a plain space; collapses runs of horizontal whitespace; trims
+every line; and collapses three or more newlines to a blank line. Blank-line
+paragraph breaks survive — they carry meaning — but the indentation the source
+document was pretty-printed with does not. A string left empty is dropped rather
+than written as `""`, and list values are deduplicated.
+
+CWE's `Description`/`Summary` are plain XML text nodes rather than XHTML, so they
+never reach `flatten_xhtml()` — but their line breaks are the same source
+indentation (`"it does\n        not validate"`), so they are unwrapped the same
+way. Inside `flatten_xhtml()` the unwrapping happens at the leaf string, before
+the structural newlines are added, so `"- "` list items don't get merged back
+into one line. A `Likelihood` of `Unknown` and an `Effectiveness` of `None` are
+dropped rather than stored: a missing field already means "not assessed" here.
+
+Two things are deliberately *not* touched. Markup that is quoted **content**
+stays verbatim — XSS payloads, SOAP envelopes, C includes and `<a>`/`<script>`
+samples appear inside these descriptions as the thing being described, and
+stripping them would destroy the text. And a lone newline is only collapsed into
+a space where the source is known to hard-wrap its text; elsewhere it is a real
+line break and is kept.
+
 ## Output
 
 Two JSON files, each a plain array of records.
@@ -167,13 +195,13 @@ out of `weakness`:
 ### `relationships.json` — 18,339 records
 
 Every record is `type: "relationship"` with id, relationship_type, source_ref
-and target_ref. The 4,337 `related-to` edges point *outside* this bundle and are
+and target_ref. The 4,337 `related_to` edges point *outside* this bundle and are
 the only ones carrying `source_name`:
 
 | `relationship_type` | Count | Endpoints |
 |---|---|---|
 | `has_member` | 5,024 | category/view → weakness |
-| `related-to` | 4,337 | weakness → CVE (3,125, from `ObservedExamples`) or → CAPEC (1,212, from `RelatedAttackPatterns`) |
+| `related_to` | 4,337 | weakness → CVE (3,125, from `ObservedExamples`) or → CAPEC (1,212, from `RelatedAttackPatterns`) |
 | `applies_to_platform` | 2,072 | weakness → platform |
 | `has_mitigation` | 1,710 | weakness → mitigation |
 | `introduced_in` | 1,398 | weakness → introduction |

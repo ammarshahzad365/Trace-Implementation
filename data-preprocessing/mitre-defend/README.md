@@ -129,7 +129,7 @@ throughout rather than `d3fend-id` — one consistent join key across every type
     edge when more than one bridge justifies it — 3,544 edges over 3,234 pairs.
   - A mapping's `off_tech_parent`/`off_tactic` and their `*_rel` fields are
     **not** turned into edges: they're ATT&CK-side sub-technique and tactic facts
-    already captured by `mitre-attack`'s own `subtechnique-of`/`has_tactic`, so
+    already captured by `mitre-attack`'s own `subtechnique_of`/`has_tactic`, so
     re-deriving them would duplicate that dataset. `query_def_tech_label`/
     `top_def_tech_label` are dropped for a different reason — they carry no id at
     all, and name other rungs of the technique hierarchy that happened to anchor
@@ -137,6 +137,24 @@ throughout rather than `d3fend-id` — one consistent join key across every type
 - Every edge gets a deterministic `relationship--<uuid5>` id seeded from every
   attribute, not just the triple — `counters` edges legitimately repeat a pair
   with a different artifact bridge. Reruns are byte-identical.
+
+## Every string is normalized on the way out
+
+`clean_record()` runs over every entity and every edge in `write_outputs()`, so
+no builder has to remember to tidy up after itself. Per string it: converts CRLF
+and lone CR to LF; turns non-breaking spaces, tabs and other exotic space
+characters into a plain space; collapses runs of horizontal whitespace; trims
+every line; and collapses three or more newlines to a blank line. Blank-line
+paragraph breaks survive — they carry meaning — but the indentation the source
+document was pretty-printed with does not. A string left empty is dropped rather
+than written as `""`, and list values are deduplicated.
+
+Two things are deliberately *not* touched. Markup that is quoted **content**
+stays verbatim — XSS payloads, SOAP envelopes, C includes and `<a>`/`<script>`
+samples appear inside these descriptions as the thing being described, and
+stripping them would destroy the text. And a lone newline is only collapsed into
+a space where the source is known to hard-wrap its text; elsewhere it is a real
+line break and is kept.
 
 ## Output
 

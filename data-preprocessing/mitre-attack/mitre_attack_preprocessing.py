@@ -25,12 +25,19 @@ Output `type` renames STIX's `attack-pattern`/`course-of-action` to
 `attack-technique`/`attack-mitigation`: CAPEC uses those same two STIX types for
 its own, different attack patterns and mitigations, so left unrenamed they'd
 collide as one Neo4j label spanning two catalogs.
+
+Every string is normalized on the way out by `clean_record()`: CRLF to LF,
+non-breaking spaces and tabs to plain spaces, horizontal whitespace runs
+collapsed, lines trimmed, empty values and duplicate list entries dropped.
+Blank-line paragraph breaks survive; source-document indentation does not.
+Markup that is quoted content (payloads, code samples) is left verbatim.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -105,7 +112,7 @@ EXTERNAL_RELATIONSHIP_KEY = "external-relationship"
 # Log sources have no STIX object of their own -- synthesized from the
 # `x_mitre_log_sources`/`x_mitre_log_source_references` maps, so this key sits alongside
 # FIELDS_BY_TYPE's real STIX types rather than inside it. The id is prefixed because 7 of
-# the 351 names are bare words ("File", "Process") that D3FEND also uses as artifact ids;
+# the 348 names are bare words ("File", "Process") that D3FEND also uses as artifact ids;
 # the bare name stays on the record as `name`.
 LOG_SOURCE_KEY = "log-source"
 LOG_SOURCE_ID_PREFIX = f"{LOG_SOURCE_KEY}--"
@@ -115,11 +122,12 @@ HAS_MEMBER_RELATIONSHIP_TYPE = "has_member"
 HAS_ANALYTIC_RELATIONSHIP_TYPE = "has_analytic"
 USES_DATA_COMPONENT_RELATIONSHIP_TYPE = "uses_data_component"
 HAS_LOG_SOURCE_RELATIONSHIP_TYPE = "has_log_source"
-EXTERNAL_RELATIONSHIP_TYPE = "related-to"
+EXTERNAL_RELATIONSHIP_TYPE = "related_to"
 
-# Upstream writes a literal "None" string (not JSON null) for 184 absent log-source
-# channels -- normalized away so it can't load as a real value.
-ABSENT_CHANNEL_SENTINEL = "None"
+# Upstream writes a literal "None" string (not JSON null) where a field doesn't apply --
+# 184 log-source channels and 179 `x_mitre_platforms` entries -- normalized away so it
+# can't load as a real value.
+ABSENT_VALUE_SENTINELS = frozenset({"None"})
 
 MUTABLE_ELEMENT_NOTE_SEPARATOR = " -- "  # verified absent from every field name and description
 
@@ -135,6 +143,14 @@ ENTITY_TYPE_LABEL_OVERRIDES: Dict[str, str] = {
     "course-of-action": "attack-mitigation",
 }
 
+# Upstream free text carries CRLF endings, non-breaking spaces, tabs and the indentation
+# of the document it was serialized from. None of it is content, all of it lands verbatim
+# in a Neo4j property and breaks string matching, so `clean_text()` normalizes it away.
+COLLAPSIBLE_SPACE_PATTERN = re.compile(r"[\u00a0\u2007\u202f\ufeff\t]")
+HORIZONTAL_RUN_PATTERN = re.compile(r"[^\S\n]{2,}")
+BLANK_LINE_RUN_PATTERN = re.compile(r"\n{3,}")
+SOFT_WRAP_PATTERN = re.compile(r"(?<!\n)\n(?!\n)")
+
 ENTITIES_FILENAME = "entities.json"
 RELATIONSHIPS_FILENAME = "relationships.json"
 
@@ -145,6 +161,43 @@ RELATIONSHIP_KEYS: Tuple[str, ...] = (RELATIONSHIP_KEY, DERIVED_RELATIONSHIP_KEY
 
 class ParseError(RuntimeError):
     pass
+
+
+def clean_text(value: str, unwrap: bool = False) -> str:
+    """Normalize one free-text string: CRLF/CR to LF, non-breaking and other exotic
+    spaces plus tabs to a plain space, runs of horizontal whitespace collapsed, every
+    line trimmed. Blank-line paragraph breaks are preserved; with `unwrap`, a lone
+    newline is treated as source-indentation wrapping and becomes a space."""
+    text = value.replace("\r\n", "\n").replace("\r", "\n")
+    text = COLLAPSIBLE_SPACE_PATTERN.sub(" ", text)
+    text = HORIZONTAL_RUN_PATTERN.sub(" ", text)
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    if unwrap:
+        text = SOFT_WRAP_PATTERN.sub(" ", text)
+    return BLANK_LINE_RUN_PATTERN.sub("\n\n", text).strip()
+
+
+def clean_value(value: Any) -> Any:
+    """Normalize every string in a property value, dropping the ones left empty or equal
+    to a sentinel, and deduping list values."""
+    if isinstance(value, str):
+        text = clean_text(value)
+        return None if not text or text in ABSENT_VALUE_SENTINELS else text
+    if isinstance(value, list):
+        kept = [item for item in map(clean_value, value) if item is not None]
+        return list(dict.fromkeys(kept)) or None
+    return value
+
+
+def clean_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Run every property through `clean_value`, dropping those left empty. Applied once
+    per record on the way out, so no builder has to remember to trim or dedupe itself."""
+    cleaned: Dict[str, Any] = {}
+    for key, value in record.items():
+        value = clean_value(value)
+        if value is not None:
+            cleaned[key] = value
+    return cleaned
 
 
 def load_objects(input_dir: Path) -> List[Dict[str, Any]]:
@@ -205,12 +258,21 @@ def make_relationship(source_ref: str, target_ref: str, relationship_type: str, 
     return record
 
 
+def normalize_relationship_type(relationship_type: str) -> str:
+    """STIX spells its own relationship types with hyphens (`subtechnique-of`), while
+    every type derived here is snake_case. A hyphen has to be backtick-quoted as a Neo4j
+    relationship type, so unify on snake_case -- these are all single words plus hyphens,
+    so the rewrite can't collide with an existing name."""
+    return relationship_type.replace("-", "_")
+
+
 def build_native_relationship(obj: Dict[str, Any], id_to_final_id: Dict[str, str]) -> Optional[Dict[str, Any]]:
     record = filter_object(obj, RELATIONSHIP_PASSTHROUGH_FIELDS)
     final_source = id_to_final_id.get(record["source_ref"])
     final_target = id_to_final_id.get(record["target_ref"])
     if final_source is None or final_target is None:
         return None  # one endpoint was the losing side of an id collision -- see resolve_canonical_ids
+    record["relationship_type"] = normalize_relationship_type(record["relationship_type"])
     record["source_ref"] = final_source
     record["target_ref"] = final_target
     return record
@@ -266,9 +328,14 @@ def build_ref_field_relationships(
 
 
 def clean_channel(value: Any) -> Optional[str]:
-    if not value or str(value).strip() in ("", ABSENT_CHANNEL_SENTINEL):
-        return None
-    return str(value)
+    return clean_value(str(value)) if value else None
+
+
+def clean_log_source_name(value: Any) -> Optional[str]:
+    """Log source names key their own entity, so they are trimmed here rather than on the
+    way out: three of the 354 upstream names carry a trailing space (`"networkconfig "`)
+    and would otherwise split into a second node alongside their trimmed twin."""
+    return clean_value(value) if isinstance(value, str) else None
 
 
 def build_analytic_relationships(
@@ -283,7 +350,7 @@ def build_analytic_relationships(
             continue
         target_ref = resolve_entity_id(data_component_stix_id, id_to_final_id, f"analytic {entity_id} x_mitre_log_source_references")
         extra: Dict[str, Any] = {}
-        name = log_source.get("name")
+        name = clean_log_source_name(log_source.get("name"))
         if name:
             # every name here is also on some data component's own x_mitre_log_sources,
             # but register it anyway so log_source_ref can never dangle
@@ -300,7 +367,7 @@ def build_log_source_relationships(
     obj: Dict[str, Any], entity_id: Optional[str], log_source_names: Dict[str, None]
 ) -> List[Dict[str, Any]]:
     """Unpack a data component's `x_mitre_log_sources` list-of-{name, channel} maps.
-    `name` is a shared vocabulary -- 351 colon-namespaced codes (`WinEventLog:Security`)
+    `name` is a shared vocabulary -- 348 mostly colon-namespaced codes (`WinEventLog:Security`)
     reused across components -- so it becomes its own entity, which also gives the
     `log_source_ref` on `uses_data_component` edges a real node to resolve against.
     `channel` is free-text analyst prose (43% of values run past 60 characters), so it
@@ -309,7 +376,7 @@ def build_log_source_relationships(
         return []
     relationships = []
     for log_source in obj.get("x_mitre_log_sources", []) or []:
-        name = log_source.get("name")
+        name = clean_log_source_name(log_source.get("name"))
         if not name:
             continue
         log_source_names[name] = None
@@ -479,7 +546,8 @@ def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> 
     output_dir.mkdir(parents=True, exist_ok=True)
     files: Dict[str, List[Dict[str, Any]]] = {ENTITIES_FILENAME: [], RELATIONSHIPS_FILENAME: []}
     for key, records in result.items():
-        files[RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME].extend(records)
+        target = RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME
+        files[target].extend(clean_record(record) for record in records)
     for filename, records in files.items():
         with (output_dir / filename).open("w", encoding="utf-8") as handle:
             json.dump(records, handle, indent=2)

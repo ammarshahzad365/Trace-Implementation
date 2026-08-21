@@ -29,6 +29,12 @@ XHTML-shaped rich text (`ExtendedDescription`, `BackgroundDetails`, a view's
 not structure, so `flatten_xhtml()` renders it to one plain-text string.
 `AffectedResources`/`FunctionalAreas`/`Audience` are unwrapped from their
 single-key wrapper dicts to plain arrays.
+
+Every string is normalized on the way out by `clean_record()`: CRLF to LF,
+non-breaking spaces and tabs to plain spaces, horizontal whitespace runs
+collapsed, lines trimmed, empty values and duplicate list entries dropped.
+Blank-line paragraph breaks survive; source-document indentation does not.
+Markup that is quoted content (payloads, code samples) is left verbatim.
 """
 
 from __future__ import annotations
@@ -41,7 +47,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-COMMON_FIELDS: Tuple[str, ...] = ("id", "cwe_id", "Name", "type", "Status", "created", "modified")
+# `cwe_id` is deliberately absent: it is the bare number behind `id` (`5` vs `CWE-5`) on
+# all 1,450 catalog records, so as a second property it only duplicates the key. The raw
+# field is still read directly off `obj` to build edge endpoints.
+COMMON_FIELDS: Tuple[str, ...] = ("id", "Name", "type", "Status", "created", "modified")
 
 # Fields kept verbatim -- no nesting, no flattening needed.
 WEAKNESS_SCALAR_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("Abstraction", "Structure", "Description", "LikelihoodOfExploit")
@@ -56,7 +65,7 @@ FIELDS_BY_TYPE: Dict[str, Tuple[str, ...]] = {
 
 # Every edge pointing outside this bundle; `source_name` says which external system,
 # the same convention capec_preprocessing.py uses.
-EXTERNAL_RELATIONSHIP_TYPE = "related-to"
+EXTERNAL_RELATIONSHIP_TYPE = "related_to"
 
 # RelatedWeakness Nature -> relationship_type. CWE stores only one direction per pair
 # (no ParentOf/CanFollow/RequiredBy appear), and even PeerOf is reciprocal in just 16 of
@@ -114,6 +123,19 @@ SUB_ENTITY_TYPES: Tuple[str, ...] = (
     DETECTION_METHOD_ENTITY_TYPE,
 )
 
+# Upstream free text carries CRLF endings, non-breaking spaces, tabs and the indentation
+# of the document it was serialized from. None of it is content, all of it lands verbatim
+# in a Neo4j property and breaks string matching, so `clean_text()` normalizes it away.
+COLLAPSIBLE_SPACE_PATTERN = re.compile(r"[\u00a0\u2007\u202f\ufeff\t]")
+HORIZONTAL_RUN_PATTERN = re.compile(r"[^\S\n]{2,}")
+BLANK_LINE_RUN_PATTERN = re.compile(r"\n{3,}")
+SOFT_WRAP_PATTERN = re.compile(r"(?<!\n)\n(?!\n)")
+
+# CWE writes a literal "None"/"Unknown" where a field was considered and left unset. A
+# missing field is omitted rather than written out, so these are dropped to match.
+ABSENT_VALUE_SENTINELS = frozenset({"None"})
+UNSET_LIKELIHOOD_SENTINEL = "Unknown"
+
 ENTITIES_FILENAME = "entities.json"
 RELATIONSHIPS_FILENAME = "relationships.json"
 
@@ -147,6 +169,43 @@ def as_list(value: Any) -> List[Any]:
     return value if isinstance(value, list) else [value]
 
 
+def clean_text(value: str, unwrap: bool = False) -> str:
+    """Normalize one free-text string: CRLF/CR to LF, non-breaking and other exotic
+    spaces plus tabs to a plain space, runs of horizontal whitespace collapsed, every
+    line trimmed. Blank-line paragraph breaks are preserved; with `unwrap`, a lone
+    newline is treated as source-indentation wrapping and becomes a space."""
+    text = value.replace("\r\n", "\n").replace("\r", "\n")
+    text = COLLAPSIBLE_SPACE_PATTERN.sub(" ", text)
+    text = HORIZONTAL_RUN_PATTERN.sub(" ", text)
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    if unwrap:
+        text = SOFT_WRAP_PATTERN.sub(" ", text)
+    return BLANK_LINE_RUN_PATTERN.sub("\n\n", text).strip()
+
+
+def clean_value(value: Any) -> Any:
+    """Normalize every string in a property value, dropping the ones left empty or equal
+    to the `"None"` sentinel, and deduping list values."""
+    if isinstance(value, str):
+        text = clean_text(value)
+        return None if not text or text in ABSENT_VALUE_SENTINELS else text
+    if isinstance(value, list):
+        kept = [item for item in map(clean_value, value) if item is not None]
+        return list(dict.fromkeys(kept)) or None
+    return value
+
+
+def clean_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Run every property through `clean_value`, dropping those left empty. Applied once
+    per record on the way out, so no builder has to remember to trim or dedupe itself."""
+    cleaned: Dict[str, Any] = {}
+    for key, value in record.items():
+        value = clean_value(value)
+        if value is not None:
+            cleaned[key] = value
+    return cleaned
+
+
 def flatten_xhtml(value: Any) -> Optional[str]:
     """Flatten CWE's XHTML-shaped rich text (a dict/list keyed by tag name -- `p`, `div`,
     `ul`/`ol` wrapping `li`, `b`) to one plain-text string. Paragraphs join with a blank
@@ -155,7 +214,9 @@ def flatten_xhtml(value: Any) -> Optional[str]:
     if value is None:
         return None
     if isinstance(value, str):
-        return value.strip() or None
+        # unwrapped at the leaf, before this function adds its own structural newlines --
+        # doing it afterwards would merge the `"- "` list items back into one line
+        return clean_text(value, unwrap=True) or None
     if isinstance(value, list):
         parts = [flatten_xhtml(item) for item in value]
         return "\n".join(part for part in parts if part) or None
@@ -178,6 +239,17 @@ def flatten_xhtml(value: Any) -> Optional[str]:
 
 def filter_object(obj: Dict[str, Any], fields: Tuple[str, ...]) -> Dict[str, Any]:
     return {field: obj[field] for field in fields if field in obj}
+
+
+def unwrap_scalar_text(record: Dict[str, Any], *fields: str) -> Dict[str, Any]:
+    """`Description`/`Summary` are plain XML text nodes rather than XHTML, so they never
+    reach flatten_xhtml -- but their line breaks are the same source-document indentation
+    (`"it does
+        not validate"`) and unwrap the same way."""
+    for field in fields:
+        if isinstance(record.get(field), str):
+            record[field] = clean_text(record[field], unwrap=True)
+    return record
 
 
 def make_relationship(source_ref: str, target_ref: str, relationship_type: str, **extra: Any) -> Dict[str, Any]:
@@ -233,7 +305,7 @@ def normalize_field_names(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_weakness_record(obj: Dict[str, Any]) -> Dict[str, Any]:
-    record = filter_object(obj, WEAKNESS_SCALAR_FIELDS)
+    record = unwrap_scalar_text(filter_object(obj, WEAKNESS_SCALAR_FIELDS), "Description")
 
     if "ExtendedDescription" in obj:
         flat = flatten_xhtml(obj["ExtendedDescription"])
@@ -366,8 +438,8 @@ def build_consequence_relationships(
     source_ref = f"CWE-{obj['cwe_id']}"
     relationships = []
     for item in as_list(obj.get("CommonConsequences", {}).get("Consequence")):
-        scope = sorted(as_list(item.get("Scope")))
-        impact = sorted(as_list(item.get("Impact")))
+        scope = sorted(set(as_list(item.get("Scope"))))
+        impact = sorted(set(as_list(item.get("Impact"))))
         if not scope and not impact:
             continue
         entity_id = get_or_create_entity(
@@ -378,7 +450,7 @@ def build_consequence_relationships(
             {"scope": scope, "impact": impact},
         )
         extra: Dict[str, Any] = {}
-        if item.get("Likelihood"):
+        if item.get("Likelihood") and item["Likelihood"] != UNSET_LIKELIHOOD_SENTINEL:
             extra["likelihood"] = item["Likelihood"]
         note = flatten_xhtml(item.get("Note"))
         if note:
@@ -511,7 +583,7 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             result[EXTERNAL_RELATIONSHIP_KEY].extend(build_related_attack_pattern_relationships(obj))
             result[EXTERNAL_RELATIONSHIP_KEY].extend(build_observed_example_relationships(obj))
         elif obj_type == "category":
-            result["category"].append(normalize_field_names(filter_object(obj, CATEGORY_FIELDS)))
+            result["category"].append(normalize_field_names(unwrap_scalar_text(filter_object(obj, CATEGORY_FIELDS), "Summary")))
             result[RELATIONSHIP_KEY].extend(build_has_member_relationships(obj, "Relationships"))
         elif obj_type == "view":
             result["view"].append(normalize_field_names(build_view_record(obj)))
@@ -528,7 +600,8 @@ def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> 
     output_dir.mkdir(parents=True, exist_ok=True)
     files: Dict[str, List[Dict[str, Any]]] = {ENTITIES_FILENAME: [], RELATIONSHIPS_FILENAME: []}
     for key, records in result.items():
-        files[RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME].extend(records)
+        target = RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME
+        files[target].extend(clean_record(record) for record in records)
     for filename, records in files.items():
         with (output_dir / filename).open("w", encoding="utf-8") as handle:
             json.dump(records, handle, indent=2)

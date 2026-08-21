@@ -18,12 +18,21 @@ property) unpacks into shared `consequence` entities plus `has_consequence`
 edges; the attack-pattern ref fields become edges, keeping one direction of each
 reciprocal pair (`child_of`, `can_precede`) and one edge per unordered `peer_of`
 pair.
+
+Every string is normalized on the way out by `clean_record()`: CRLF to LF,
+non-breaking spaces and tabs to plain spaces, horizontal whitespace runs
+collapsed, lines trimmed, empty values and duplicate list entries dropped.
+`flatten_xhtml()` first renders the literal `<xhtml:p>`/`<xhtml:li>` markup CAPEC
+leaves in its rich text to plain paragraphs and `"- "` lines, matching what CWE's
+own flattener produces. Only the `xhtml:` namespace counts as markup -- every
+other tag in those fields is quoted content and survives verbatim.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -34,6 +43,8 @@ ATTACK_PATTERN_FIELDS: Tuple[str, ...] = (
     "name",
     "description",
     "type",
+    "created",
+    "modified",
     "x_capec_abstraction",
     "x_capec_domains",
     "x_capec_prerequisites",
@@ -44,9 +55,9 @@ ATTACK_PATTERN_FIELDS: Tuple[str, ...] = (
     "x_capec_extended_description",
 )
 
-COURSE_OF_ACTION_FIELDS: Tuple[str, ...] = ("id", "name", "description", "type")
+COURSE_OF_ACTION_FIELDS: Tuple[str, ...] = ("id", "name", "description", "type", "created", "modified")
 
-RELATIONSHIP_FIELDS: Tuple[str, ...] = ("id", "type", "relationship_type", "source_ref", "target_ref", "created")
+RELATIONSHIP_FIELDS: Tuple[str, ...] = ("id", "type", "relationship_type", "source_ref", "target_ref", "created", "modified")
 
 FIELDS_BY_TYPE: Dict[str, Tuple[str, ...]] = {
     "attack-pattern": ATTACK_PATTERN_FIELDS,
@@ -58,7 +69,7 @@ DROPPED_TYPES = {"identity", "marking-definition"}
 
 # external_references source_name values that become outward-pointing edges.
 EXTERNAL_RELATIONSHIP_SOURCE_NAMES = {"cwe", "ATTACK"}
-EXTERNAL_RELATIONSHIP_TYPE = "related-to"
+EXTERNAL_RELATIONSHIP_TYPE = "related_to"
 EXTERNAL_RELATIONSHIP_KEY = "external-relationship"
 
 # Only one direction of each reciprocal pair is kept; parent_of/can_follow are
@@ -80,9 +91,35 @@ CONSEQUENCE_ENTITY_TYPE = "consequence"
 # CAPEC writes this scope with an underscore where CWE writes a space.
 CONSEQUENCE_SCOPE_ALIASES: Dict[str, str] = {"Access_Control": "Access Control"}
 
-# Renamed to the name another source already uses; `x_capec_*` fields have no twin
-# elsewhere, so they keep their prefix.
-FIELD_NAME_OVERRIDES: Dict[str, str] = {"x_capec_extended_description": "extended_description"}
+# Renamed to the name another source already uses. The remaining `x_capec_*` fields
+# (`prerequisites`, `typical_severity`, `domains`, ...) have no twin elsewhere, so they
+# keep their prefix.
+FIELD_NAME_OVERRIDES: Dict[str, str] = {
+    "x_capec_extended_description": "extended_description",
+    "x_capec_abstraction": "abstraction",  # CWE spells its own catalog-level field this way
+}
+
+# Upstream free text carries CRLF endings, non-breaking spaces, tabs and the indentation
+# of the XML it was serialized from. None of it is content, all of it lands verbatim in a
+# Neo4j property and breaks string matching, so `clean_text()` normalizes it away.
+COLLAPSIBLE_SPACE_PATTERN = re.compile(r"[\u00a0\u2007\u202f\ufeff\t]")
+HORIZONTAL_RUN_PATTERN = re.compile(r"[^\S\n]{2,}")
+BLANK_LINE_RUN_PATTERN = re.compile(r"\n{3,}")
+SOFT_WRAP_PATTERN = re.compile(r"(?<!\n)\n(?!\n)")
+
+# CAPEC wraps its rich text in XHTML tags that survive into the STIX bundle as literal
+# markup (`<xhtml:p>...</xhtml:p>`). Only this `xhtml:` namespace is CAPEC's own
+# formatting -- every other tag in these fields is quoted content (XSS payloads, SOAP
+# envelopes, C includes, `<security-constraint>` samples) and must survive verbatim.
+XHTML_BLOCK_TAG_PATTERN = re.compile(r"\s*(</?xhtml:(?:p|div|ul|ol|li|blockquote)\b[^>]*>)\s*", re.I)
+XHTML_LIST_ITEM_PATTERN = re.compile(r"<xhtml:li\b[^>]*>", re.I)
+XHTML_BLOCK_END_PATTERN = re.compile(r"</xhtml:(?:p|div|ul|ol|blockquote)>", re.I)
+XHTML_TAG_PATTERN = re.compile(r"</?xhtml:[\w.-]+[^>]*>", re.I)
+
+# Upstream writes a literal "None" where a field simply doesn't apply (11 attack
+# patterns' `x_capec_prerequisites`). A missing field is omitted rather than written out,
+# so this is dropped to match.
+ABSENT_VALUE_SENTINELS = frozenset({"None"})
 
 ENTITIES_FILENAME = "entities.json"
 RELATIONSHIPS_FILENAME = "relationships.json"
@@ -107,6 +144,58 @@ def load_objects(input_path: Path) -> List[Dict[str, Any]]:
     if not isinstance(objects, list):
         raise ParseError(f"Expected a STIX bundle with an 'objects' list at {input_path}")
     return [obj for obj in objects if isinstance(obj, dict)]
+
+
+def clean_text(value: str, unwrap: bool = False) -> str:
+    """Normalize one free-text string: CRLF/CR to LF, non-breaking and other exotic
+    spaces plus tabs to a plain space, runs of horizontal whitespace collapsed, every
+    line trimmed. Blank-line paragraph breaks are preserved; with `unwrap`, a lone
+    newline is treated as source-indentation wrapping and becomes a space."""
+    text = value.replace("\r\n", "\n").replace("\r", "\n")
+    text = COLLAPSIBLE_SPACE_PATTERN.sub(" ", text)
+    text = HORIZONTAL_RUN_PATTERN.sub(" ", text)
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    if unwrap:
+        text = SOFT_WRAP_PATTERN.sub(" ", text)
+    return BLANK_LINE_RUN_PATTERN.sub("\n\n", text).strip()
+
+
+def flatten_xhtml(value: str) -> str:
+    """Render CAPEC's embedded XHTML markup to plain text, matching what CWE's own
+    `flatten_xhtml()` produces: paragraphs separated by a blank line, list items as `"- "`
+    lines. Whitespace hugging a *block* tag is the source document's indentation and goes;
+    whitespace around an inline `<xhtml:b>`/`<xhtml:i>` is real spacing between words and
+    stays. Tags outside the `xhtml:` namespace are quoted content, not markup, and are
+    left exactly as they are -- as are newlines inside a paragraph, which in the 5 values
+    that have any are line breaks in a quoted code sample."""
+    text = XHTML_BLOCK_TAG_PATTERN.sub(r"\1", value)
+    text = XHTML_LIST_ITEM_PATTERN.sub("\n- ", text)
+    text = XHTML_BLOCK_END_PATTERN.sub("\n\n", text)
+    text = XHTML_TAG_PATTERN.sub("", text)
+    return clean_text(text)
+
+
+def clean_value(value: Any) -> Any:
+    """Flatten and normalize every string in a property value, dropping the ones left
+    empty or equal to the `"None"` sentinel, and deduping list values."""
+    if isinstance(value, str):
+        text = flatten_xhtml(value)
+        return None if not text or text in ABSENT_VALUE_SENTINELS else text
+    if isinstance(value, list):
+        kept = [item for item in map(clean_value, value) if item is not None]
+        return list(dict.fromkeys(kept)) or None
+    return value
+
+
+def clean_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Run every property through `clean_value`, dropping those left empty. Applied once
+    per record after the builders have run, so builders read source values verbatim."""
+    cleaned: Dict[str, Any] = {}
+    for key, value in record.items():
+        value = clean_value(value)
+        if value is not None:
+            cleaned[key] = value
+    return cleaned
 
 
 def filter_object(obj: Dict[str, Any], fields: Tuple[str, ...]) -> Dict[str, Any]:
@@ -149,6 +238,14 @@ def build_external_relationships(obj: Dict[str, Any], capec_id: int) -> List[Dic
         seen.add((source_name, target_ref))
         relationships.append(make_relationship(source_ref, target_ref, EXTERNAL_RELATIONSHIP_TYPE, source_name=source_name))
     return relationships
+
+
+def normalize_relationship_type(relationship_type: str) -> str:
+    """STIX spells its own relationship types with hyphens, while every type derived here
+    is snake_case. A hyphen has to be backtick-quoted as a Neo4j relationship type, so
+    unify on snake_case. (CAPEC's only native type is `mitigates`; this guards the
+    passthrough against upstream adding a hyphenated one.)"""
+    return relationship_type.replace("-", "_")
 
 
 def resolve_capec_ref(stix_id: str, id_to_capec_id: Dict[str, int]) -> str:
@@ -283,6 +380,7 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             continue
         if obj_type == "relationship":
             record = filter_object(obj, RELATIONSHIP_FIELDS)
+            record["relationship_type"] = normalize_relationship_type(record["relationship_type"])
             record["source_ref"] = remap_attack_pattern_ref(record["source_ref"], id_to_capec_id)
             record["target_ref"] = remap_attack_pattern_ref(record["target_ref"], id_to_capec_id)
             result["relationship"].append(record)
@@ -304,11 +402,14 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
 
 def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> Dict[str, int]:
     """Write every entity record to entities.json and every edge to relationships.json,
-    concatenated in `result`'s own insertion order so reruns are byte-stable."""
+    concatenated in `result`'s own insertion order so reruns are byte-stable. Every
+    record passes through `clean_record()` on the way out -- one place, so no builder has
+    to remember to flatten markup or trim whitespace itself."""
     output_dir.mkdir(parents=True, exist_ok=True)
     files: Dict[str, List[Dict[str, Any]]] = {ENTITIES_FILENAME: [], RELATIONSHIPS_FILENAME: []}
     for key, records in result.items():
-        files[RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME].extend(records)
+        target = RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME
+        files[target].extend(clean_record(record) for record in records)
     for filename, records in files.items():
         with (output_dir / filename).open("w", encoding="utf-8") as handle:
             json.dump(records, handle, indent=2)

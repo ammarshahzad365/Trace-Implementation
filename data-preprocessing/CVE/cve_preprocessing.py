@@ -31,6 +31,12 @@ discarded: `cvss_assessment_count` counts distinct `(version, vector, score)`
 claims within the winner's major version, and `cvss_base_score_min`/`_max` bracket
 the spread when that exceeds one. SSVC contributes only its three decision points,
 from the newest assessment by timestamp.
+
+Every string is normalized on the way out by `clean_record()`: CRLF to LF,
+non-breaking spaces and tabs to plain spaces, horizontal whitespace runs
+collapsed, lines trimmed, empty values and duplicate list entries dropped.
+Blank-line paragraph breaks survive; source-document indentation does not.
+Markup that is quoted content (payloads, code samples) is left verbatim.
 """
 
 from __future__ import annotations
@@ -55,7 +61,7 @@ VULNERABILITY_FIELDS: Tuple[str, ...] = (
 
 DROPPED_VULN_STATUSES = {"Rejected"}
 
-EXTERNAL_RELATIONSHIP_TYPE = "related-to"
+EXTERNAL_RELATIONSHIP_TYPE = "related_to"
 EXTERNAL_RELATIONSHIP_SOURCE_NAME = "cwe"
 REAL_CWE_PREFIX = "CWE-"
 
@@ -175,6 +181,18 @@ SSVC_PREFIX = "ssvc_"
 # `timestamp`) is scoring-process metadata, not a fact about the CVE.
 SSVC_KEPT_FIELDS: Tuple[str, ...] = ("exploitation", "automatable", "technical_impact")
 
+# Upstream free text carries CRLF endings, non-breaking spaces, tabs and the indentation
+# of the document it was serialized from. None of it is content, all of it lands verbatim
+# in a Neo4j property and breaks string matching, so `clean_text()` normalizes it away.
+COLLAPSIBLE_SPACE_PATTERN = re.compile(r"[\u00a0\u2007\u202f\ufeff\t]")
+HORIZONTAL_RUN_PATTERN = re.compile(r"[^\S\n]{2,}")
+BLANK_LINE_RUN_PATTERN = re.compile(r"\n{3,}")
+SOFT_WRAP_PATTERN = re.compile(r"(?<!\n)\n(?!\n)")
+
+# No value here is dropped as a sentinel: NVD's own "none" (SSVC `exploitation`, CVSS
+# impact metrics) is a real enum member, not an absent-value marker.
+ABSENT_VALUE_SENTINELS: frozenset = frozenset()
+
 ENTITIES_FILENAME = "entities.json"
 RELATIONSHIPS_FILENAME = "relationships.json"
 
@@ -185,6 +203,43 @@ RELATIONSHIP_KEYS: Tuple[str, ...] = (EXTERNAL_RELATIONSHIP_KEY,)
 
 class ParseError(RuntimeError):
     pass
+
+
+def clean_text(value: str, unwrap: bool = False) -> str:
+    """Normalize one free-text string: CRLF/CR to LF, non-breaking and other exotic
+    spaces plus tabs to a plain space, runs of horizontal whitespace collapsed, every
+    line trimmed. Blank-line paragraph breaks are preserved; with `unwrap`, a lone
+    newline is treated as source-indentation wrapping and becomes a space."""
+    text = value.replace("\r\n", "\n").replace("\r", "\n")
+    text = COLLAPSIBLE_SPACE_PATTERN.sub(" ", text)
+    text = HORIZONTAL_RUN_PATTERN.sub(" ", text)
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    if unwrap:
+        text = SOFT_WRAP_PATTERN.sub(" ", text)
+    return BLANK_LINE_RUN_PATTERN.sub("\n\n", text).strip()
+
+
+def clean_value(value: Any) -> Any:
+    """Normalize every string in a property value, dropping the ones left empty or equal
+    to a sentinel, and deduping list values."""
+    if isinstance(value, str):
+        text = clean_text(value)
+        return None if not text or text in ABSENT_VALUE_SENTINELS else text
+    if isinstance(value, list):
+        kept = [item for item in map(clean_value, value) if item is not None]
+        return list(dict.fromkeys(kept)) or None
+    return value
+
+
+def clean_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Run every property through `clean_value`, dropping those left empty. Applied once
+    per record on the way out, so no builder has to remember to trim or dedupe itself."""
+    cleaned: Dict[str, Any] = {}
+    for key, value in record.items():
+        value = clean_value(value)
+        if value is not None:
+            cleaned[key] = value
+    return cleaned
 
 
 def load_objects(input_dir: Path) -> List[Dict[str, Any]]:
@@ -354,6 +409,12 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             continue
 
         cve_id = str(obj.get("name") or "")
+        if not cve_id:
+            # every record upstream carries one, but an id-less node would silently
+            # collide with the next id-less node at load time rather than fail loudly
+            dropped_counts["no CVE id"] = dropped_counts.get("no CVE id", 0) + 1
+            continue
+
         record = build_vulnerability_record(obj, cve_id)
 
         cvss = obj.get("x_nvd_cvss") or {}
@@ -384,7 +445,8 @@ def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> 
     output_dir.mkdir(parents=True, exist_ok=True)
     files: Dict[str, List[Dict[str, Any]]] = {ENTITIES_FILENAME: [], RELATIONSHIPS_FILENAME: []}
     for key, records in result.items():
-        files[RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME].extend(records)
+        target = RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME
+        files[target].extend(clean_record(record) for record in records)
     for filename, records in files.items():
         with (output_dir / filename).open("w", encoding="utf-8") as handle:
             json.dump(records, handle, indent=2)

@@ -42,8 +42,15 @@ own output) and `--output-dir` (default: this folder).
   `also_known_as` edges its `target_ref` was the alias *text*, so all 27 pointed
   at nothing that exists and would have invented a phantom node per string.
   `aliases` is also what CWE/ATT&CK/D3FEND call this concept.
-- `x_capec_extended_description` is renamed `extended_description` to match CWE.
-  Other `x_capec_*` fields keep their prefix — no other source spells them.
+- `x_capec_extended_description` is renamed `extended_description` and
+  `x_capec_abstraction` is renamed `abstraction`, both to match CWE, which spells
+  its own catalog-level fields that way (CAPEC's values are Meta/Standard/
+  Detailed where CWE's are Pillar/Class/Base/Variant/Compound, but the field
+  plays the same role in both hierarchies). The remaining `x_capec_*` fields keep
+  their prefix — no other source spells them.
+- `created`/`modified` are kept on attack patterns, courses of action and native
+  edges alike, matching CWE/CVE/ATT&CK, so every node in the graph that has
+  upstream provenance timestamps carries them under the same two names.
 - The attack-pattern ref fields become edges too:
   - `child_of`/`parent_of` and `can_precede`/`can_follow` are perfectly
     reciprocal upstream, so only one direction is emitted rather than storing
@@ -97,6 +104,34 @@ weaknesses. The 364 prose strings go with them; if wanted back, the shape is a
 self-labelling `list[str]` on the attack pattern (`"High -- <prose>"`, as
 CWE's `alias_notes` does), not a re-promotion to nodes.
 
+## Every string is normalized on the way out
+
+`clean_record()` runs over every entity and every edge in `write_outputs()`, so
+no builder has to remember to tidy up after itself. Per string it: converts CRLF
+and lone CR to LF; turns non-breaking spaces, tabs and other exotic space
+characters into a plain space; collapses runs of horizontal whitespace; trims
+every line; and collapses three or more newlines to a blank line. Blank-line
+paragraph breaks survive — they carry meaning — but the indentation the source
+document was pretty-printed with does not. A string left empty is dropped rather
+than written as `""`, and list values are deduplicated.
+
+CAPEC additionally arrives with its rich text still wrapped in XHTML markup —
+`description`, `x_capec_extended_description`, `x_capec_example_instances` and
+`x_capec_resources_required` carry literal `<xhtml:p>`/`<xhtml:li>` tags on 365
+values between them. `flatten_xhtml()` renders those to the same plain text CWE's
+own flattener produces: paragraphs separated by a blank line, list items as `"- "`
+lines. Only the `xhtml:` namespace is treated as markup — every other tag in
+those fields is quoted content and is left alone. Whitespace hugging a *block*
+tag is source indentation and goes; whitespace around an inline `<xhtml:b>` is
+spacing between words and stays.
+
+Two things are deliberately *not* touched. Markup that is quoted **content**
+stays verbatim — XSS payloads, SOAP envelopes, C includes and `<a>`/`<script>`
+samples appear inside these descriptions as the thing being described, and
+stripping them would destroy the text. And a lone newline is only collapsed into
+a space where the source is known to hard-wrap its text; elsewhere it is a real
+line break and is kept.
+
 ## Output
 
 Two JSON files, each a plain array of records.
@@ -105,8 +140,8 @@ Two JSON files, each a plain array of records.
 
 | `type` | Count | Contents |
 |---|---|---|
-| `course-of-action` | 877 | Mitigations — id (a STIX id; CAPEC has no numbering for these), name, description only (CAPEC's `name` here is a generic placeholder, not a real title) |
-| `attack-pattern` | 615 | Attack patterns — id (`CAPEC-N`), stix_id, name, description, `extended_description`, `aliases`, and the remaining `x_capec_*` analytic fields (abstraction, domains, prerequisites, typical severity, likelihood of attack, resources required, example instances) |
+| `course-of-action` | 877 | Mitigations — id (a STIX id; CAPEC has no numbering for these), name, description, created, modified (CAPEC's `name` here is a generic placeholder, not a real title) |
+| `attack-pattern` | 615 | Attack patterns — id (`CAPEC-N`), stix_id, name, description, created, modified, `abstraction`, `extended_description`, `aliases`, and the remaining `x_capec_*` analytic fields (domains, prerequisites, typical severity, likelihood of attack, resources required, example instances) |
 | `consequence` | 46 | Distinct `(scope, impact)` pairs, same shape and `type` as CWE's — id (`consequence--<uuid5>`), scope, impact |
 
 ### `relationships.json` — 4,930 records
@@ -117,8 +152,8 @@ and target_ref:
 | `relationship_type` | Count | Endpoints |
 |---|---|---|
 | `has_consequence` | 1,563 | attack-pattern → consequence, with the split-out `note` on 394 |
-| `related-to` | 1,483 | `CAPEC-N` → `CWE-N`/`T####`, from each attack pattern's `cwe`/`ATTACK` external_references — the only edges carrying `source_name` |
-| `mitigates` | 1,172 | course-of-action → attack-pattern (STIX id → `CAPEC-N`). The only edges keeping their upstream STIX id, and the only ones carrying `created` |
+| `related_to` | 1,483 | `CAPEC-N` → `CWE-N`/`T####`, from each attack pattern's `cwe`/`ATTACK` external_references — the only edges carrying `source_name` |
+| `mitigates` | 1,172 | course-of-action → attack-pattern (STIX id → `CAPEC-N`). The only edges keeping their upstream STIX id, and the only ones carrying `created`/`modified` |
 | `child_of` | 533 | attack-pattern → attack-pattern (one direction; `parent_of` is its exact inverse) |
 | `can_precede` | 162 | attack-pattern → attack-pattern (one direction; `can_follow` is its exact inverse) |
 | `peer_of` | 17 | attack-pattern → attack-pattern, deduped per unordered pair |

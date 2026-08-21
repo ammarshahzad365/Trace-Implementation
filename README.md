@@ -141,7 +141,7 @@ cd ../data-loading  && py main.py                   # update the graph in place
 | Source | What it contributes | Nodes | Upstream |
 |---|---|---|---|
 | **CVE** (NVD) | Specific real-world vulnerabilities, plus CVSS/SSVC severity | 940,892 | NVD REST API 2.0 |
-| **MITRE ATT&CK** | Adversary techniques, malware, threat groups, detections | 6,052 | TAXII 2.1 |
+| **MITRE ATT&CK** | Adversary techniques, malware, threat groups, detections | 6,049 | TAXII 2.1 |
 | **CWE** | Classes of software weakness, and their mitigations | 5,056 | Versioned XML catalog |
 | **CAPEC** | Attack patterns — how weaknesses get abused | 1,538 | Pre-built STIX bundle |
 | **MITRE D3FEND** | Defensive countermeasures, and what they counter | 1,193 | D3FEND REST API |
