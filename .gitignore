@@ -1,7 +1,7 @@
 .env
 *.json
 __pycache__/
-
+.claude/
 # data-loading/ working files: the id->label registry cache (rebuilt from the
 # preprocessed output, which is itself gitignored above) and the load report.
 data-loading/.cache/
