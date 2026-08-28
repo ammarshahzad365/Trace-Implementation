@@ -23,7 +23,7 @@ entries and are dropped.
 `x_nvd_cvss` is folded onto the vulnerability as `cvss_`/`ssvc_`-prefixed
 properties rather than becoming nodes: an earlier pass cost one node and one edge
 per assessment (593,945 of each) to model something the CVE -> ... -> D3FEND
-trace never traverses and queries only ever read as a filter or sort key.
+trace never passes through and that is only ever read as a filter or sort key.
 `cvss_rank` picks a winner by version precedence (4.0 > 3.1 > 3.0 > 2.0), then
 `Primary` over `Secondary`, then base score, then input position -- a total order
 over the record's own fields, so reruns are byte-identical. Disagreement isn't
@@ -182,8 +182,8 @@ SSVC_PREFIX = "ssvc_"
 SSVC_KEPT_FIELDS: Tuple[str, ...] = ("exploitation", "automatable", "technical_impact")
 
 # Upstream free text carries CRLF endings, non-breaking spaces, tabs and the indentation
-# of the document it was serialized from. None of it is content, all of it lands verbatim
-# in a Neo4j property and breaks string matching, so `clean_text()` normalizes it away.
+# of the document it was serialized from. None of it is content, all of it survives
+# verbatim into the output and breaks string matching, so `clean_text()` normalizes it away.
 COLLAPSIBLE_SPACE_PATTERN = re.compile(r"[\u00a0\u2007\u202f\ufeff\t]")
 HORIZONTAL_RUN_PATTERN = re.compile(r"[^\S\n]{2,}")
 BLANK_LINE_RUN_PATTERN = re.compile(r"\n{3,}")

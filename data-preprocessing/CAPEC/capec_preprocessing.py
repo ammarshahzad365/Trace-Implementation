@@ -13,8 +13,8 @@ outward edges carrying `source_name`; the bibliographic ones are dropped.
 
 Fields that don't survive verbatim: `x_capec_status`, `x_capec_execution_flow`
 and `x_capec_skills_required` are dropped; `x_capec_alternate_terms` folds into
-an `aliases` property; `x_capec_consequences` (a map, illegal as a Neo4j
-property) unpacks into shared `consequence` entities plus `has_consequence`
+an `aliases` property; `x_capec_consequences` (a map, and nothing in the
+output nests) unpacks into shared `consequence` entities plus `has_consequence`
 edges; the attack-pattern ref fields become edges, keeping one direction of each
 reciprocal pair (`child_of`, `can_precede`) and one edge per unordered `peer_of`
 pair.
@@ -84,7 +84,7 @@ HAS_CONSEQUENCE_RELATIONSHIP_TYPE = "has_consequence"
 ATTACK_PATTERN_RELATIONSHIP_KEY = "attack-pattern-relationship"
 
 # Deliberately the same `type` (and {scope, impact} shape) CWE's preprocessor emits, so
-# both catalogs' consequences land under one Neo4j label. Ids stay per-catalog: these
+# both catalogs' consequences share one record type. Ids stay per-catalog: these
 # preprocessors run independently and can't share an id space.
 CONSEQUENCE_ENTITY_TYPE = "consequence"
 
@@ -100,8 +100,8 @@ FIELD_NAME_OVERRIDES: Dict[str, str] = {
 }
 
 # Upstream free text carries CRLF endings, non-breaking spaces, tabs and the indentation
-# of the XML it was serialized from. None of it is content, all of it lands verbatim in a
-# Neo4j property and breaks string matching, so `clean_text()` normalizes it away.
+# of the XML it was serialized from. None of it is content, all of it survives verbatim
+# into the output and breaks string matching, so `clean_text()` normalizes it away.
 COLLAPSIBLE_SPACE_PATTERN = re.compile(r"[\u00a0\u2007\u202f\ufeff\t]")
 HORIZONTAL_RUN_PATTERN = re.compile(r"[^\S\n]{2,}")
 BLANK_LINE_RUN_PATTERN = re.compile(r"\n{3,}")
@@ -242,9 +242,8 @@ def build_external_relationships(obj: Dict[str, Any], capec_id: int) -> List[Dic
 
 def normalize_relationship_type(relationship_type: str) -> str:
     """STIX spells its own relationship types with hyphens, while every type derived here
-    is snake_case. A hyphen has to be backtick-quoted as a Neo4j relationship type, so
-    unify on snake_case. (CAPEC's only native type is `mitigates`; this guards the
-    passthrough against upstream adding a hyphenated one.)"""
+    is snake_case, so native types are rewritten to match. (CAPEC's only native type is
+    `mitigates`; this guards the passthrough against upstream adding a hyphenated one.)"""
     return relationship_type.replace("-", "_")
 
 

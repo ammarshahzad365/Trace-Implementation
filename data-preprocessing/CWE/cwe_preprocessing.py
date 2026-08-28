@@ -124,8 +124,8 @@ SUB_ENTITY_TYPES: Tuple[str, ...] = (
 )
 
 # Upstream free text carries CRLF endings, non-breaking spaces, tabs and the indentation
-# of the document it was serialized from. None of it is content, all of it lands verbatim
-# in a Neo4j property and breaks string matching, so `clean_text()` normalizes it away.
+# of the document it was serialized from. None of it is content, all of it survives
+# verbatim into the output and breaks string matching, so `clean_text()` normalizes it away.
 COLLAPSIBLE_SPACE_PATTERN = re.compile(r"[\u00a0\u2007\u202f\ufeff\t]")
 HORIZONTAL_RUN_PATTERN = re.compile(r"[^\S\n]{2,}")
 BLANK_LINE_RUN_PATTERN = re.compile(r"\n{3,}")

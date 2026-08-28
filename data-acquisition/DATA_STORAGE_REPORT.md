@@ -255,8 +255,9 @@ object's `x_capec_version` property — CAPEC has no separate version endpoint.
 (`https://attack-taxii.mitre.org/api/v21/`), three collections (Enterprise,
 Mobile, ICS ATT&CK). This is the only source of the five with a **true
 date-filtered incremental fetch** (`added_after` cursor) and the only one with
-a **complete locally-vendored version history**, seeded once from a cloned
-copy of `mitre/attack-stix-data` at `structured-data/mitre-attack/`.
+a **complete locally-vendored version history**, seeded once from a clone of
+`mitre/attack-stix-data` (that clone is no longer kept in the repo — the
+seeded `history/` folders are).
 
 **On-disk layout**, per domain:
 
@@ -434,8 +435,8 @@ files (not sampled), so these are exhaustive, not illustrative.
 CVE records have no internal cross-references at all: no `vulnerability`
 object points to another `vulnerability` object. Each CVE stands alone in
 `records/<year>/latest.json`; the only edges it carries point *out* of CVE
-entirely (§7.1). If you need CVE-to-CVE relatedness (e.g. shared CPEs,
-shared CWE) it has to be derived, not read off the record.
+entirely (§7.1). CVE-to-CVE relatedness (e.g. shared CPEs, shared CWE) is not
+recorded and cannot be read off the record.
 
 ### 6.2 CWE — weakness hierarchy + category/view membership
 
@@ -453,7 +454,7 @@ distribution across all 969 weaknesses:
 
 Only the child-side of each pair is stored (a weakness records `ChildOf`
 pointing at its parent; the parent does not separately record `ParentOf`) —
-building a bidirectional graph means adding the inverse edge yourself.
+so the stored form is one-directional, not bidirectional.
 Additionally: `category.Relationships.HasMember` → **4,260** weakness↔category
 membership edges, `view.Members.HasMember` → **764** weakness↔view membership
 edges (both `{CWE_ID, View_ID}` pairs, view-scoped).
@@ -500,7 +501,7 @@ show up if you read the object's own fields):
 
 So a full technique's neighborhood in the ATT&CK graph spans two different
 linking mechanisms (STIX relationship objects **and** embedded id/string
-refs) — a KG ingestion pass needs both, not just the `relationship` objects.
+refs) — the `relationship` objects alone do not cover it.
 
 ### 6.5 MITRE D3FEND — class hierarchy + weakness-to-artifact
 
@@ -514,14 +515,13 @@ verified) point a weakness class at the specific **artifact** it's a weakness
 of (e.g. `d3f:CWE-119` `weakness-of` `d3f:RawMemoryAccessFunction`) — all 26
 targets resolve cleanly into the `artifacts` domain.
 
-**Important limitation for KG building**: the `techniques`, `tactics`, and
+**Important limitation**: the `techniques`, `tactics`, and
 `artifacts` domains fetched standalone carry **no relation fields to each
 other** (a technique record is just `@id`/`@type`/`d3fend-id`/`label`/
 `synonym` — confirmed by a full field-presence sweep across all 271 technique
 records, all 7 tactics, and all 915 artifacts). Technique↔tactic↔artifact
-relationships exist **only** inside the `mappings` domain (§7.5) — if you
-ingest the five entity domains alone you get disconnected vocabularies, not a
-graph.
+relationships exist **only** inside the `mappings` domain (§7.5) — the five
+entity domains on their own are disconnected vocabularies, not a graph.
 
 ---
 
@@ -554,8 +554,8 @@ names *specific* real-world CVEs that exemplify it.
 - **CAPEC → CWE**: `attack-pattern.external_references[source_name="cwe"]` — **1,214** such references across 615 attack-patterns (an attack-pattern typically cites several CWEs). This is the denser, more complete direction.
 
 Because both directions exist independently (not one derived from the other
-upstream), **do not assume symmetry** — a KG build should reconcile both sets
-and expect some CWE↔CAPEC pairs to appear in only one direction.
+upstream), **the two sets are not symmetric** — some CWE↔CAPEC pairs
+appear in only one direction.
 
 ### 7.4 CAPEC ↔ MITRE ATT&CK (structured, asymmetric — CAPEC's direction is far more complete)
 
@@ -571,23 +571,22 @@ and expect some CWE↔CAPEC pairs to appear in only one direction.
   `off_tech —[off_artifact_rel]→ off_artifact`, `off_tech —[off_tactic_rel: always "enables"]→ off_tactic`,
   plus `off_tech_parent` (the ATT&CK parent technique, when `off_tech` is a sub-technique).
   Distinct node counts inside `mappings`: **149** distinct D3FEND techniques, **74** distinct D3FEND artifacts, **7** distinct D3FEND tactics (matches `tactics/latest.json` exactly), **325** distinct ATT&CK techniques referenced, **172** distinct ATT&CK-side artifacts, **12** distinct ATT&CK tactics.
-  Edge-label vocabulary (this *is* the D3FEND relation ontology — use these as your KG's edge types, not generic "relates_to"):
+  Edge-label vocabulary (this *is* the D3FEND relation ontology — these verbs are the relation names, not a generic "relates_to"):
   `def_artifact_rel` — 34 distinct verbs, top ones: `analyzes` (3,381), `filters` (2,828), `modifies` (1,072), `restores` (920), `isolates` (895), `restricts` (540), `deletes` (490), `quarantines` (440), `spoofs` (428), `inventories` (370), `strengthens` (363), `encrypts` (360), `monitors` (341), `hardens` (260), `blocks` (232) — plus 19 more.
   `off_artifact_rel` — 33 distinct verbs, top ones: `modifies` (2,609), `may-modify` (1,881), `produces` (1,681), `creates` (1,501), `accesses` (1,108), `may-create` (978), `uses` (510), `adds` (507), `executes` (409), `loads` (372) — plus 23 more.
   `def_tactic_rel` and `off_tactic_rel` are each a single constant value, `enables`, across all 14,003 rows.
   **Join-key integrity, verified**: every `def_tech` value resolves into `techniques/latest.json`, every `def_artifact` into `artifacts/latest.json`, every `off_tech_id` into `offensive-techniques/latest.json`'s `d3f:attack-id` set — **0 orphans out of 149/74/325 distinct values respectively**. These are reliable foreign keys, not lossy approximations.
 
-### 7.6 Confirmed absent / indirect-only links (equally important for KG scoping)
+### 7.6 Confirmed absent / indirect-only links
 
-- **MITRE ATT&CK ↔ CWE**: no structured link exists. A regex sweep for the exact pattern `CWE-\d+` across the entire `enterprise/latest.json` (45.4 MB) returned **zero matches** — the ~30 raw substring hits for "cwe" are incidental (inside unrelated words/citations), not real references. If you need this edge, it must be inferred transitively (ATT&CK technique → D3FEND offensive-technique → D3FEND mapping → D3FEND artifact/weakness → CWE), not read directly.
+- **MITRE ATT&CK ↔ CWE**: no structured link exists. A regex sweep for the exact pattern `CWE-\d+` across the entire `enterprise/latest.json` (45.4 MB) returned **zero matches** — the ~30 raw substring hits for "cwe" are incidental (inside unrelated words/citations), not real references. This edge exists only transitively (ATT&CK technique → D3FEND offensive-technique → D3FEND mapping → D3FEND artifact/weakness → CWE), not read directly.
 - **MITRE D3FEND ↔ CAPEC**: no field anywhere in D3FEND references a CAPEC id directly. The only path is transitive: `D3FEND weakness --d3f:cwe-id--> CWE --RelatedAttackPatterns--> CAPEC`.
 - The five D3FEND entity domains (`techniques`/`tactics`/`artifacts`) carry no relations to each other outside `mappings` (§6.5) — don't expect a graph from them in isolation.
 
-### 7.7 Unstructured cross-references (present as free text — need IE/NLP, not a JSON field)
+### 7.7 Unstructured cross-references (present as free text, not as a JSON field)
 
-These exist and are non-trivial in volume, but require the kind of extraction
-pipeline this repo's `Prompts/` folder (`ie.txt`/`et.txt`/`link.txt`) already
-seems aimed at, rather than a plain field lookup:
+These exist and are non-trivial in volume, but they sit in prose rather than in
+a field of their own, so no plain field lookup finds them:
 
 - **MITRE ATT&CK → CVE**: a regex sweep for `CVE-\d{4}-\d+` across
   `enterprise/latest.json` found **175 distinct CVE ids**, appearing in **167**
@@ -601,8 +600,8 @@ seems aimed at, rather than a plain field lookup:
 
 ### 7.8 Cross-source id-format normalization needed for joins
 
-Not every source spells the same id the same way — a KG ingestion pipeline
-needs to normalize before joining:
+Not every source spells the same id the same way, so the ids have to be
+normalized before anything joins on them:
 - **CWE ids**: `"CWE-119"` (with prefix) in CVE's `x_nvd_weaknesses` and
   D3FEND's `d3f:cwe-id`; bare `"119"`/`"CWE_ID": "119"` (no prefix) in CWE's
   own `RelatedAttackPattern.CAPEC_ID`-style fields and CAPEC's
@@ -617,7 +616,7 @@ needs to normalize before joining:
 
 ---
 
-## 8. A full 5-source traversal (proof the graph actually connects end-to-end)
+## 8. A full 5-source traversal (proof the five sources connect end-to-end)
 
 Chaining the structured edges above (§7.1–7.5), a single concrete path
 touches all five sources without ever leaving a verified, structured field:
@@ -641,38 +640,7 @@ weak links in this chain are exactly the two gaps identified in §7.6: there
 is no *direct* CWE→D3FEND or ATT&CK→CVE edge, so both hops have to go through
 an intermediate source's join key.
 
-## 9. Suggested node/edge schema for a knowledge graph
-
-Node types, one per distinct entity kind actually observed on disk:
-
-| Node label | Source(s) | Key field |
-|---|---|---|
-| `CVE` | CVE | `name` (`CVE-YYYY-NNNNN`) |
-| `CWEWeakness` / `CWECategory` / `CWEView` | CWE | `id` (`CWE-N`) |
-| `CAPECAttackPattern` / `CAPECMitigation` | CAPEC | `id` / `external_id` (`CAPEC-N`) |
-| `ATTACKTechnique`, `ATTACKMalware`, `ATTACKIntrusionSet`, `ATTACKCampaign`, `ATTACKTool`, `ATTACKTactic`, `ATTACKDataComponent`, `ATTACKAnalytic`, `ATTACKDetectionStrategy`, (`ATTACKAsset` for ICS only) | ATT&CK | `external_references[].external_id` (`T####[.###]`) |
-| `D3FENDTechnique`, `D3FENDTactic`, `D3FENDArtifact` | D3FEND | `@id` |
-
-Edge types (source_label —edge_type→ target_label : field it comes from):
-- `CVE —HAS_WEAKNESS→ CWEWeakness` (§7.1) / `CWEWeakness —EXEMPLIFIED_BY→ CVE` (§7.2)
-- `CWEWeakness —CHILD_OF/CAN_PRECEDE/PEER_OF/CAN_ALSO_BE/REQUIRES/STARTS_WITH→ CWEWeakness` (§6.2)
-- `CWECategory|CWEView —HAS_MEMBER→ CWEWeakness` (§6.2)
-- `CWEWeakness —RELATED_TO→ CAPECAttackPattern` (union of both §7.3 directions, deduped)
-- `CAPECMitigation —MITIGATES→ CAPECAttackPattern` (§6.3) plus `CAPECAttackPattern —CHILD_OF/PARENT_OF/PEER_OF/CAN_PRECEDE/CAN_FOLLOW→ CAPECAttackPattern` (§6.3)
-- `CAPECAttackPattern —CORRESPONDS_TO→ ATTACKTechnique` (union of both §7.4 directions, CAPEC's own the primary source)
-- `ATTACKMalware|IntrusionSet|Campaign|Tool —USES→ ATTACKTechnique`, `ATTACKCourseOfAction —MITIGATES→ ATTACKTechnique`, `ATTACKDetectionStrategy —DETECTS→ ATTACKTechnique`, `ATTACKTechnique —SUBTECHNIQUE_OF→ ATTACKTechnique`, `— REVOKED_BY→`, `Campaign —ATTRIBUTED_TO→ IntrusionSet` (§6.4, use the exact triple table as the edge-type allowlist)
-- `D3FENDWeakness —MAPS_TO→ CWEWeakness` (§7.5), `D3FENDOffensiveTechnique —MAPS_TO→ ATTACKTechnique` (§7.5)
-- `D3FENDTechnique —<def_artifact_rel verb>→ D3FENDArtifact`, `D3FENDTechnique —ENABLES→ D3FENDTactic`, `ATTACKTechnique —<off_artifact_rel verb>→ D3FENDArtifact`, `ATTACKTechnique —ENABLES→ D3FENDTactic`, and critically `D3FENDTechnique —COUNTERS→ ATTACKTechnique` (derived: any `mappings` row co-occurring a `def_tech` and `off_tech`) — this last synthetic edge is likely the single most valuable one for a "Trace" defense-to-offense graph, since D3FEND doesn't state it as a single field but it's fully derivable from every mapping row.
-- `D3FENDWeakness —WEAKNESS_OF→ D3FENDArtifact` (§6.5)
-
-Treat §7.7's unstructured CVE mentions (ATT&CK, CAPEC) as a **separate,
-lower-confidence edge type** (e.g. `MENTIONS`, sourced from IE over free
-text) rather than merging them with the structured edges above — they carry
-real signal but a different reliability profile.
-
----
-
-## 10. Cross-cutting design patterns (crawler-level, not data-level)
+## 9. Cross-cutting design patterns (crawler-level, not data-level)
 
 All five crawlers share:
 - **Atomic writes**: every JSON file is written to a `.tmp` sibling then
@@ -695,20 +663,18 @@ definition of "changed."
 
 ---
 
-## 11. Consolidated relationship reference (for knowledge graph construction)
+## 10. Consolidated relationship reference
 
 Everything below is pulled from §6–§7's verified findings, reorganized into
-flat, parser-ready tables — one row per extractable relation, in the shape
-`(subject_type, relation, object_type)` plus exactly which field to read it
-from. This is the section to work off of when writing the entity/relationship
-extraction code; §6–§7 have the narrative reasoning and counts if you need to
-double-check something here.
+flat tables — one row per extractable relation, in the shape
+`(subject_type, relation, object_type)` plus exactly which field it is read
+from. §6–§7 carry the narrative reasoning and the counts behind each row.
 
-### 11.1 Intra-source relations (edges within one source's own data)
+### 10.1 Intra-source relations (edges within one source's own data)
 
 | # | Source | Subject type | Relation | Object type | Field on disk | Count | Notes |
 |---|---|---|---|---|---|---|---|
-| 1 | CWE | Weakness | `ChildOf` | Weakness | `RelatedWeaknesses.RelatedWeakness[Nature=ChildOf]` | 1,318 | only the child side is stored — add the inverse yourself |
+| 1 | CWE | Weakness | `ChildOf` | Weakness | `RelatedWeaknesses.RelatedWeakness[Nature=ChildOf]` | 1,318 | only the child side is stored; the inverse is absent |
 | 2 | CWE | Weakness | `CanPrecede` | Weakness | `RelatedWeaknesses.RelatedWeakness[Nature=CanPrecede]` | 143 | |
 | 3 | CWE | Weakness | `PeerOf` | Weakness | `RelatedWeaknesses.RelatedWeakness[Nature=PeerOf]` | 98 | symmetric in meaning, stored one-directionally |
 | 4 | CWE | Weakness | `CanAlsoBe` | Weakness | `RelatedWeaknesses.RelatedWeakness[Nature=CanAlsoBe]` | 27 | |
@@ -737,7 +703,7 @@ double-check something here.
 | 27 | D3FEND | Weakness | `WeaknessOf` | Artifact | `d3f:weakness-of` | 26 | all 26 resolve into `artifacts` |
 | 28 | D3FEND | Weakness | `MayBeWeaknessOf` | Artifact | `d3f:may-be-weakness-of` | 3 | |
 
-### 11.2 Inter-source (cross-dataset) relations
+### 10.2 Inter-source (cross-dataset) relations
 
 | # | From (subject) | Relation | To (object) | Field on disk | Direction / reliability | Count |
 |---|---|---|---|---|---|---|
@@ -753,20 +719,20 @@ double-check something here.
 | 10 | D3FEND Technique | `Enables` | D3FEND Tactic | `mappings.def_tech` / `def_tactic` | structured, constant verb | 14,003 rows |
 | 11 | ATT&CK Technique | `<off_artifact_rel verb>` | D3FEND Artifact | `mappings.off_tech_id` / `off_artifact` / `off_artifact_rel` | structured, 0 orphans verified | 14,003 rows, 33 distinct verbs |
 | 12 | ATT&CK Technique | `Enables` | D3FEND Tactic | `mappings.off_tech_id` / `off_tactic` | structured, constant verb | 14,003 rows |
-| 13 | D3FEND Technique | `Counters` | ATT&CK Technique | derived: co-occurrence of `def_tech` + `off_tech` in the same `mappings` row | structured but **synthetic** (D3FEND doesn't state it as one field — you derive it) | up to 14,003 pairs (149 × 325 distinct entities involved) |
+| 13 | D3FEND Technique | `Counters` | ATT&CK Technique | derived: co-occurrence of `def_tech` + `off_tech` in the same `mappings` row | structured but **synthetic** (D3FEND doesn't state it as one field; it is derived from the row) | up to 14,003 pairs (149 × 325 distinct entities involved) |
 | 14 | ATT&CK object (any type) | `Mentions` | CVE | free text in `description` / `external_references` | **unstructured — regex/IE required, not a JSON field** | 175 distinct CVE ids across 167+229 hits |
 | 15 | CAPEC AttackPattern | `Mentions` | CVE | free text in `description` / `x_capec_example_instances` | **unstructured — regex/IE required** | 59 distinct CVE ids |
 
-### 11.3 Confirmed absent (don't spend time looking for these)
+### 10.3 Confirmed absent
 
 | From | To | Status |
 |---|---|---|
 | ATT&CK | CWE | No structured field anywhere; a `CWE-\d+` regex over all of `enterprise/latest.json` returns 0 matches. Only reachable transitively via D3FEND (ATT&CK → D3FEND offensive-technique → D3FEND mapping → D3FEND weakness → CWE). |
 | D3FEND | CAPEC | No field anywhere. Only reachable transitively via CWE (D3FEND weakness → CWE → CAPEC). |
-| D3FEND `technique`/`tactic`/`artifact` (fetched standalone) | each other | No relation fields outside `mappings` — ingest those three domains expecting disconnected vocabularies unless `mappings` is also loaded. |
+| D3FEND `technique`/`tactic`/`artifact` (fetched standalone) | each other | No relation fields outside `mappings` — those three domains are disconnected vocabularies on their own. |
 | CVE | CVE | No CVE-to-CVE relation of any kind exists in this data. |
 
-### 11.4 id-format normalization required before joining (see §7.8 for the full explanation)
+### 10.4 id-format differences that must be normalized before joining (see §7.8)
 
 | id | prefixed form seen in | bare form seen in |
 |---|---|---|

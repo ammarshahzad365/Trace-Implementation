@@ -1,21 +1,22 @@
 # Trace-Implementation
 
 This project pulls five public cyber-security catalogs from the internet, cleans
-them up, and joins them into one knowledge graph. 
+them up, and turns them into one connected set of entity and relationship files -
+a knowledge graph in JSON form.
 
-## Where the project stands
+## The two stages
 
-| Stage | Folder | What it does | Status |
-|---|---|---|---|
-| **1. Get the data** | [`data-acquisition/`](data-acquisition/) | Downloads CVE, CWE, CAPEC, ATT&CK and D3FEND and saves a local copy you can re-check and diff | Done |
-| **2. Clean the data** | [`data-preprocessing/`](data-preprocessing/) | Turns each source into flat, graph-ready JSON: one entity file and one relationship file per source | Done |
+| Stage | Folder | What it does |
+|---|---|---|
+| **1. Get the data** | [`data-acquisition/`](data-acquisition/) | Downloads CVE, CWE, CAPEC, ATT&CK and D3FEND and saves a local copy you can re-check and diff |
+| **2. Clean the data** | [`data-preprocessing/`](data-preprocessing/) | Turns each source into flat JSON: one entity file and one relationship file per source |
 
 Each stage only reads the stage before it, so you can re-run any one of them on
 its own.
 
 ## Running it
 
-You need Python 3.12+ .
+You need Python 3.12 or newer.
 
 ### 1. Credentials
 
@@ -41,7 +42,7 @@ Add `--sources cve` to run just one source. Details are in
 [`data-acquisition/README.md`](data-acquisition/README.md) and in each source's
 own README.
 
-### 3. Clean it into graph-ready JSON
+### 3. Clean it into flat JSON
 
 ```bash
 cd data-preprocessing
@@ -73,9 +74,7 @@ cd ../data-preprocessing && py main.py                  # clean it again
 | **CAPEC** | Attack patterns: how a weakness gets abused | 1,538 | 4,930 | Pre-built STIX bundle |
 | **MITRE D3FEND** | Defences, and what each one counters | 1,193 | 6,471 | D3FEND REST API |
 
-CVE is by far the biggest source by count. The interesting part - the trace path
-itself - is only about 20,000 records: a small, dense core inside a large shell
-of CVEs.
+
 
 ## Folder map
 

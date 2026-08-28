@@ -1,80 +1,75 @@
 # MITRE ATT&CK Crawlers
 
-This folder contains the ATT&CK data acquisition tools.
+Downloads MITRE ATT&CK from its TAXII 2.1 server and keeps three things in one
+place: the scripts, a versioned archive of past releases, and the current
+snapshot for each domain.
 
-## Quick Start
+## Quick start
 
-1. Open PowerShell in this folder.
-2. Run `.
-un.ps1`.
-3. Type `1`, `2`, or `3` when prompted for which crawler to run.
-4. Type `1`, `2`, `3`, `4`, or a comma-separated combination (e.g. `1,3`) when prompted for which domain(s) to sync.
+Open PowerShell in this folder and run:
 
-That is the easiest way to use this folder.
+```powershell
+.\run.ps1
+```
 
-Crawler options:
+It asks two questions:
 
-- `1` = historical loader
-- `2` = full crawler
-- `3` = incremental crawler
+1. **Which crawler?** `1` = historical loader, `2` = full crawler,
+   `3` = incremental crawler.
+2. **Which domain(s)?** `1` = Enterprise, `2` = Mobile, `3` = ICS, `4` = all.
+   You can also give a combination, e.g. `1,3`.
 
-Domain options:
+Run the **historical loader first**, so the version archive and the starting
+snapshot exist. After any run, each script prints one line per domain: how many
+objects were added, changed or removed, and which files it wrote, changed or
+left alone.
 
-- `1` = Enterprise ATT&CK
-- `2` = Mobile ATT&CK
-- `3` = ICS ATT&CK
-- `4` = all domains
+## The scripts
 
-After a run finishes, each script prints a one-line summary per domain showing how many objects were added/modified/removed and which output files were created, modified, or left unchanged.
+- `historical_loader.py` - loads every ATT&CK release already sitting in the
+  workspace, stores them in the local history archive, and builds the first
+  snapshot from the newest one.
+- `full_crawler.py` - fetches the complete current dataset, rewrites the latest
+  snapshot, and checks whether the local copy was already up to date.
+- `incremental_crawler.py` - reads the last successful fetch time from the
+  manifest, fetches only new or changed objects, updates the snapshot, and
+  writes a delta file.
+- `client.py` - shared helper code for all three.
+- `run.ps1` - the interactive menu above. It is the only command most people
+  need.
 
-## What this folder does
+## Domain folders
 
-This folder is the local ATT&CK sync workspace. It keeps three things together:
+`enterprise/`, `mobile/` and `ics/` each hold:
 
-- the scripts that load and refresh ATT&CK data
-- the versioned historical archive
-- the current latest-state and delta outputs for each domain
-
-## Layout
-
-### Scripts
-
-- `historical_loader.py` - loads every versioned ATT&CK release already present in the workspace, stores them in the local history archive, and seeds the current snapshot from the newest local release.
-- `full_crawler.py` - fetches the complete current ATT&CK dataset, rewrites the latest snapshot, and checks whether the local copy is current.
-- `incremental_crawler.py` - reads the last successful fetch time from the manifest, fetches only new or modified objects, updates the latest snapshot, and writes a delta file.
-- `client.py` - shared helper code used by all three scripts.
-- `run.ps1` - simple interactive launcher that asks which script to run.
-
-### Domain folders
-
-- `enterprise/` - Enterprise ATT&CK outputs.
-- `mobile/` - Mobile ATT&CK outputs.
-- `ics/` - ICS ATT&CK outputs.
-
-Each domain folder stores:
-
-- `history/` - versioned release archive created by the historical loader. Each file in here is one historical ATT&CK release, named by version.
-- `latest.json` - the current canonical STIX bundle for that domain. This is the full latest local snapshot.
-- `derived.json` - a filtered bundle that keeps only the ATT&CK object types used most often for analysis.
-- `manifest.json` - the sync record for that domain. It tracks the source collection, the last successful fetch time, the run mode, and counts used to decide what changed.
-- `delta.json` - the change set from the most recent incremental run. This is written only by the incremental crawler.
+- `history/` - one file per past ATT&CK release, named by version. Written by
+  the historical loader.
+- `latest.json` - the current full snapshot for that domain.
+- `derived.json` - a filtered copy keeping only the object types used most in
+  analysis.
+- `manifest.json` - the sync record: source collection, last successful fetch
+  time, run mode, and the counts used to work out what changed.
+- `delta.json` - the changes from the most recent incremental run. Written only
+  by the incremental crawler.
 
 ## What the data looks like
 
-Every `latest.json`/`derived.json`/`delta.json`/`history/<version>.json` is
-one flat STIX 2.1 bundle: `{"type": "bundle", "id": "...", "objects": [...]}`.
-`enterprise/latest.json` alone holds 25,843 objects across a dozen-plus STIX
-types (`relationship` 21,025, `attack-pattern` 858, `malware` 729,
-`x-mitre-analytic` 1,758, `x-mitre-detection-strategy` 699,
-`course-of-action` 268, `intrusion-set` 189, `tool` 95, `campaign` 56,
-`x-mitre-tactic` 15, plus one each of `identity`/`marking-definition`/
-`x-mitre-collection`/`x-mitre-matrix`). `ics/` additionally has
-`x-mitre-asset` (physical/logical ICS assets), unique to that domain. A
-technique and the relationship that ties software to it (both trimmed):
+Every `latest.json`, `derived.json`, `delta.json` and `history/<version>.json`
+is one flat STIX 2.1 bundle: `{"type": "bundle", "id": "...", "objects": [...]}`.
+
+`enterprise/latest.json` alone holds 25,843 objects across a dozen-plus types:
+`relationship` (21,025), `x-mitre-analytic` (1,758), `attack-pattern` (858),
+`malware` (729), `x-mitre-detection-strategy` (699), `course-of-action` (268),
+`intrusion-set` (189), `tool` (95), `campaign` (56), `x-mitre-tactic` (15), plus
+one each of `identity`, `marking-definition`, `x-mitre-collection` and
+`x-mitre-matrix`. `ics/` also has `x-mitre-asset` (physical and logical ICS
+assets), which no other domain has.
+
+A technique, and a relationship tying malware to it (both trimmed):
 
 ```json
 {
-  "id": "attack-pattern--43e7dc91-05b2-474c-b9ac-2ed4fe101f4d",
+  "id": "attack-pattern--43e7dc91-...",
   "name": "Process Injection",
   "external_references": [{"external_id": "T1055", "source_name": "mitre-attack", "url": "https://attack.mitre.org/techniques/T1055"}],
   "kill_chain_phases": [{"kill_chain_name": "mitre-attack", "phase_name": "privilege-escalation"}],
@@ -83,44 +78,22 @@ technique and the relationship that ties software to it (both trimmed):
 ```
 ```json
 {
-  "id": "relationship--0200e185-a06e-470c-af16-814f84f1f6d7",
+  "id": "relationship--0200e185-...",
   "relationship_type": "uses",
-  "source_ref": "malware--66637cd6-ae68-4bcd-af82-32f70a854175",
-  "target_ref": "attack-pattern--43e7dc91-05b2-474c-b9ac-2ed4fe101f4d"
+  "source_ref": "malware--66637cd6-...",
+  "target_ref": "attack-pattern--43e7dc91-..."
 }
 ```
 
-`relationship_type` values seen in `enterprise`: `uses` (malware/intrusion-set/
-campaign/tool → technique, and intrusion-set → malware/tool), `mitigates`
-(course-of-action → technique), `detects` (detection-strategy → technique),
-`subtechnique-of` and `revoked-by` (technique → technique), and
-`attributed-to` (campaign → intrusion-set). Note that technique↔tactic is
-**not** a `relationship` object at all — it's a string match between
-`attack-pattern.kill_chain_phases[].phase_name` and
+The `relationship_type` values in `enterprise` are:
+
+- `uses` - malware, group, campaign or tool -> technique, and group -> malware
+  or tool
+- `mitigates` - course-of-action -> technique
+- `detects` - detection-strategy -> technique
+- `subtechnique-of` and `revoked-by` - technique -> technique
+- `attributed-to` - campaign -> group
+
+One important gap: **technique-to-tactic is not a relationship object at all.**
+It is a string match between `attack-pattern.kill_chain_phases[].phase_name` and
 `x-mitre-tactic.x_mitre_shortname`.
-
-## Run
-
-The easiest way to run the tools is with the interactive PowerShell launcher in this folder:
-
-```powershell
-Set-Location .\data-acquisition\mitre-attack
-.\run.ps1
-```
-
-The script will ask you to choose what to run:
-
-- `1` for the historical loader
-- `2` for the full crawler
-- `3` for the incremental crawler
-
-By default it runs all three domains: Enterprise, Mobile, and ICS.
-
-## Notes
-
-- Run the historical loader first so the version archive and baseline snapshot exist.
-- `latest.json` is the full current snapshot.
-- `derived.json` is the filtered version for easier analysis.
-- `manifest.json` tracks the last successful run so the incremental crawler knows what changed.
-- `delta.json` is only written by the incremental crawler.
-- The `run.ps1` script is the only command most people need to remember.

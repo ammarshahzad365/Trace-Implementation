@@ -16,15 +16,15 @@ matrix->tactic, detection-strategy->analytic, analytic->data-component,
 data-component->log-source); and CAPEC cross-references carrying
 `source_name: "capec"`.
 
-Nothing nests -- Neo4j properties hold scalars or scalar arrays, never maps -- so
+Nothing in the output nests -- every property is a scalar or an array of scalars -- so
 ATT&CK's only two list-of-map fields are unpacked: `x_mitre_log_sources` into
 `log-source` entities plus `has_log_source` edges, and analytics'
 `x_mitre_mutable_elements` into two flat string lists.
 
 Output `type` renames STIX's `attack-pattern`/`course-of-action` to
 `attack-technique`/`attack-mitigation`: CAPEC uses those same two STIX types for
-its own, different attack patterns and mitigations, so left unrenamed they'd
-collide as one Neo4j label spanning two catalogs.
+its own, different attack patterns and mitigations, so left unrenamed they'd be
+the only `type` values shared by two catalogs.
 
 Every string is normalized on the way out by `clean_record()`: CRLF to LF,
 non-breaking spaces and tabs to plain spaces, horizontal whitespace runs
@@ -144,8 +144,8 @@ ENTITY_TYPE_LABEL_OVERRIDES: Dict[str, str] = {
 }
 
 # Upstream free text carries CRLF endings, non-breaking spaces, tabs and the indentation
-# of the document it was serialized from. None of it is content, all of it lands verbatim
-# in a Neo4j property and breaks string matching, so `clean_text()` normalizes it away.
+# of the document it was serialized from. None of it is content, all of it survives
+# verbatim into the output and breaks string matching, so `clean_text()` normalizes it away.
 COLLAPSIBLE_SPACE_PATTERN = re.compile(r"[\u00a0\u2007\u202f\ufeff\t]")
 HORIZONTAL_RUN_PATTERN = re.compile(r"[^\S\n]{2,}")
 BLANK_LINE_RUN_PATTERN = re.compile(r"\n{3,}")
@@ -260,9 +260,9 @@ def make_relationship(source_ref: str, target_ref: str, relationship_type: str, 
 
 def normalize_relationship_type(relationship_type: str) -> str:
     """STIX spells its own relationship types with hyphens (`subtechnique-of`), while
-    every type derived here is snake_case. A hyphen has to be backtick-quoted as a Neo4j
-    relationship type, so unify on snake_case -- these are all single words plus hyphens,
-    so the rewrite can't collide with an existing name."""
+    every type derived here is snake_case, so native types are rewritten to match -- these
+    are all single words plus hyphens, so the rewrite can't collide with an existing
+    name."""
     return relationship_type.replace("-", "_")
 
 
@@ -391,7 +391,7 @@ def flatten_mutable_elements(record: Dict[str, Any]) -> None:
     The `field` names are the queryable half (25 are shared by 10+ analytics) so they
     become a plain list; `description` is per-analytic tuning prose (5,145 distinct
     strings across 5,177 elements), kept as self-labelling `"field -- description"`
-    strings rather than a parallel list, since Cypher can't enforce index alignment."""
+    strings rather than a parallel list, since nothing keeps two separate lists aligned."""
     elements = record.pop("x_mitre_mutable_elements", None) or []
     fields = list(dict.fromkeys(e["field"] for e in elements if e.get("field")))
     if fields:
