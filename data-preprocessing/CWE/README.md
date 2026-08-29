@@ -93,23 +93,35 @@ record on the CVE side, rather than being invented to fill the gap.
 `ApplicablePlatforms`, `PotentialMitigations` and `DetectionMethods` each have a
 natural identity that many weaknesses reuse - platforms by `(category, name)`
 (every weakness that applies to `Language: Java` shares one node), mitigations by
-`Mitigation_ID` (70 ids across 1,710 uses), detection methods by
-`Detection_Method_ID` (23 across 959).
+`Mitigation_ID` (70 ids covering 527 of the 1,710 uses), detection methods by
+`Detection_Method_ID` (23 ids covering 483 of the 959).
 
-But the *content* next to that identity - `Prevalence`, `Phase`,
-`Effectiveness`, `Description`, `EffectivenessNotes` - really does vary per
-weakness (checked: 30 of 70 `Mitigation_ID`s and 9 of 23 `Detection_Method_ID`s
-differ between uses). So the shared node holds only the stable identity, and
-every varying field moves onto the
-`has_mitigation` / `has_detection_method` / `applies_to_platform` link - the
-same convention `RelatedWeaknesses` already uses for `ordinal` and `view_id`.
+The *content* next to that identity - `Prevalence`, `Phase`, `Effectiveness`,
+`Description`, `EffectivenessNotes` - can vary per weakness (checked: 30 of 70
+`Mitigation_ID`s and 9 of 23 `Detection_Method_ID`s differ somewhere between
+uses). So every field is copied onto the `has_mitigation` /
+`has_detection_method` / `applies_to_platform` link, which is where a consumer
+reads the value that applies to *this* weakness - the same convention
+`RelatedWeaknesses` already uses for `ordinal` and `view_id`.
+
+The shared node keeps its own copy as well, taken from its first use in document
+order. Moving the text off the node entirely would leave 70 mitigations and 23
+detection methods holding nothing but `{id, type, mitigation_id}` - unreadable
+on their own, and useless as embedding or search targets, which matters because
+these are exactly the reusable, most-referenced entries (`MIT-20` alone is cited
+by 72 weaknesses). Variation is also the exception rather than the rule: for the
+40 mitigation ids and 14 detection-method ids that never differ, the link
+attribute and the node field are simply the same string. Nothing is dropped
+either way - the link remains the authoritative per-weakness value.
 
 Mitigations and detection methods with **no id** (the majority - 1,183 of 1,710
 and 476 of 959) are never reused, so putting their detail on the link would
 leave the node empty (just `{id, type}`). A private node is pointed at by exactly
 one link, so there is no cross-use conflict to worry about; these keep their
-detail on the node and carry no link attributes at all. **No link in this dataset
-ever points at a node with no content.** Unnamed platform entries get a private
+detail on the node and carry no link attributes at all. Between the two rules,
+**no link in this dataset ever points at a node with no content of its own** -
+the one exception is a single `CWE-597` mitigation whose source `Description` is
+an empty `<br/><br/>` element with no words in it. Unnamed platform entries get a private
 node the same way, keeping only `category`, which is always present.
 
 The same logic turned out to fit two fields that were not expected to behave
@@ -185,9 +197,9 @@ The first three are CWE's own kinds; the rest are sub-records lifted out of
 | `type` | Count | Contents |
 |---|---|---|
 | `platform` | 1,527 | Deduplicated `(category, name)` platforms, plus private nodes for unnamed entries - id, category, name |
-| `mitigation` | 1,253 | 70 deduplicated by `Mitigation_ID`, plus 1,183 private per-weakness nodes - id, mitigation_id (or the detail itself, when private) |
+| `mitigation` | 1,253 | 70 deduplicated by `Mitigation_ID`, plus 1,183 private per-weakness nodes - phase, strategy, effectiveness, description, effectiveness_notes; the shared ones also carry mitigation_id |
 | `weakness` | 969 | CWE weaknesses - id, name, description, extended description, abstraction/structure/status, ordinalities, likelihood of exploit, background details, affected resources, functional areas, aliases + alias notes |
-| `detection-method` | 499 | 23 deduplicated by `Detection_Method_ID`, plus 476 private nodes - id, detection_method_id (or the detail, when private) |
+| `detection-method` | 499 | 23 deduplicated by `Detection_Method_ID`, plus 476 private nodes - method, effectiveness, description, effectiveness_notes; the shared ones also carry detection_method_id |
 | `category` | 422 | Groupings - id, name, summary |
 | `consequence` | 311 | Deduplicated `(scope, impact)` pairs - id, scope, impact |
 | `view` | 59 | Groupings for browsing and filtering - id, name, objective, `view_type`, audience |

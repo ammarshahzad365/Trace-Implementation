@@ -17,12 +17,16 @@ other taxonomies referenced by `TaxonomyMappings`/`ObservedExamples` are dropped
 Sub-records whose identity is reused across weaknesses become shared nodes:
 platforms by `(category, name)`, mitigations by `Mitigation_ID`, detection
 methods by `Detection_Method_ID`, consequences by `(scope, impact)`,
-introductions by `Phase`. The content alongside that identity genuinely varies
-per referencing weakness, so it moves onto the edge instead -- same convention
-`RelatedWeaknesses` already uses for `ordinal`/`view_id`. Sub-records with no
-natural key get a private per-occurrence node carrying the detail directly, so no
-edge ever points at an empty node. `WeaknessOrdinalities` is the exception: it
-flattens in place to a plain array, no new node type.
+introductions by `Phase`. The content alongside that identity can vary per
+referencing weakness, so it is copied onto the edge -- same convention
+`RelatedWeaknesses` already uses for `ordinal`/`view_id` -- but the shared node
+keeps its own copy too, taken from its first use in document order. A node that
+held nothing but `Mitigation_ID` would be unreadable on its own and unusable as
+an embedding target, and the variation is the exception rather than the rule
+anyway (30 of 70 mitigation ids, 9 of 23 detection-method ids). Sub-records with
+no natural key get a private per-occurrence node carrying the detail directly.
+Either way, every node carries readable content. `WeaknessOrdinalities` is the
+exception: it flattens in place to a plain array, no new node type.
 
 XHTML-shaped rich text (`ExtendedDescription`, `BackgroundDetails`, a view's
 `Objective`, and the `Description`/`EffectivenessNotes` sub-fields) is formatting,
@@ -518,10 +522,13 @@ def build_detail_relationships(
     list_fields: Tuple[str, ...] = (),
 ) -> List[Dict[str, Any]]:
     """Shared body for mitigations and detection methods -- same shape, different field
-    names. Where the source gives a reusable id, the node holds only that id and the
-    variable detail (phase/strategy/effectiveness/description/notes) goes on the edge,
-    since it genuinely differs per usage. Where it doesn't, the detail goes on the
-    private node instead, so no edge ever points at an empty node."""
+    names. Where the source gives a reusable id, the node keeps that id *and* a copy of
+    the detail from its first use in document order, so it is never an identity-only
+    shell; the per-use detail (phase/strategy/effectiveness/description/notes) still
+    rides the edge as well, because it does differ between uses for 30 of the 70
+    `Mitigation_ID`s and 9 of the 23 `Detection_Method_ID`s. Where the source gives no
+    id, the detail goes on the private node instead and the edge carries nothing.
+    Either way the node always carries readable content of its own."""
     source_ref = f"CWE-{obj['cwe_id']}"
     relationships = []
     for index, item in enumerate(as_list(obj.get(container, {}).get(item_key))):
@@ -536,7 +543,7 @@ def build_detail_relationships(
 
         source_id = item.get(id_field)
         if source_id:
-            identity_seed, fields, extra = source_id, {snake_case(id_field): source_id}, detail
+            identity_seed, fields, extra = source_id, {snake_case(id_field): source_id, **detail}, detail
         else:
             identity_seed, fields, extra = f"private|{source_ref}|{index}", detail, {}
 
