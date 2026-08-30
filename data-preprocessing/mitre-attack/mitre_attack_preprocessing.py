@@ -4,22 +4,21 @@ Merges the three raw STIX 2.1 bundles from the ATT&CK crawler
 (`data-acquisition/mitre-attack/{enterprise,mobile,ics}/latest.json`) into two
 deduplicated files: `entities.json` (techniques, malware, tools, groups,
 campaigns, mitigations, tactics, matrices, analytics, detection strategies, data
-components, assets, log sources) and `relationships.json` (every
-edge). Each record's own `type` says which kind it is. Entities are keyed by
+components, assets) and `relationships.json` (every edge). Each record's own `type` says which kind it is. Entities are keyed by
 their human-readable ATT&CK code (`T1055`, `S0002`) rather than STIX id, which
 moves to `stix_id` -- see `resolve_canonical_ids()`.
 
 Three kinds of edge share `relationships.json`: native STIX `relationship`
 objects with both endpoints rewritten into that id space; edges derived from
 embedded id-list fields with no native relationship object (technique<->tactic,
-matrix->tactic, detection-strategy->analytic, analytic->data-component,
-data-component->log-source); and CAPEC cross-references carrying
+matrix->tactic, detection-strategy->analytic, analytic->data-component); and
+CAPEC cross-references carrying
 `source_name: "capec"`.
 
 Nothing in the output nests -- every property is a scalar or an array of scalars -- so
-ATT&CK's only two list-of-map fields are unpacked: `x_mitre_log_sources` into
-`log-source` entities plus `has_log_source` edges, and analytics'
-`x_mitre_mutable_elements` into two flat string lists.
+ATT&CK's only two list-of-map fields flatten in place, both onto the record that
+owns them: `x_mitre_log_sources` into `log_sources`/`log_source_notes` on the data
+component, and analytics' `x_mitre_mutable_elements` into two flat string lists.
 
 Output `type` renames STIX's `attack-pattern`/`course-of-action` to
 `attack-technique`/`attack-mitigation`: CAPEC uses those same two STIX types for
@@ -115,19 +114,10 @@ RELATIONSHIP_KEY = "relationship"
 DERIVED_RELATIONSHIP_KEY = "derived-relationship"
 EXTERNAL_RELATIONSHIP_KEY = "external-relationship"
 
-# Log sources have no STIX object of their own -- synthesized from the
-# `x_mitre_log_sources`/`x_mitre_log_source_references` maps, so this key sits alongside
-# FIELDS_BY_TYPE's real STIX types rather than inside it. The id is prefixed because 7 of
-# the 348 names are bare words ("File", "Process") that D3FEND also uses as artifact ids;
-# the bare name stays on the record as `name`.
-LOG_SOURCE_KEY = "log-source"
-LOG_SOURCE_ID_PREFIX = f"{LOG_SOURCE_KEY}--"
-
 HAS_TACTIC_RELATIONSHIP_TYPE = "has_tactic"
 HAS_MEMBER_RELATIONSHIP_TYPE = "has_member"
 HAS_ANALYTIC_RELATIONSHIP_TYPE = "has_analytic"
 USES_DATA_COMPONENT_RELATIONSHIP_TYPE = "uses_data_component"
-HAS_LOG_SOURCE_RELATIONSHIP_TYPE = "has_log_source"
 EXTERNAL_RELATIONSHIP_TYPE = "related_to"
 
 # Upstream writes a literal "None" string (not JSON null) where a field doesn't apply --
@@ -135,7 +125,7 @@ EXTERNAL_RELATIONSHIP_TYPE = "related_to"
 # can't load as a real value.
 ABSENT_VALUE_SENTINELS = frozenset({"None"})
 
-MUTABLE_ELEMENT_NOTE_SEPARATOR = " -- "  # verified absent from every field name and description
+NOTE_SEPARATOR = " -- "  # verified absent from every field name, description, log source name and channel
 
 # `malware`/`tool` spell their alias list `x_mitre_aliases` where `intrusion-set`/
 # `campaign` use STIX's own `aliases` -- unified on `aliases`, which is also what
@@ -248,8 +238,8 @@ def extract_attack_id(obj: Dict[str, Any]) -> Optional[str]:
 
 def make_relationship(source_ref: str, target_ref: str, relationship_type: str, **extra: Any) -> Dict[str, Any]:
     # extra is folded into the seed: some derived edges legitimately repeat the same
-    # (source, type, target) with different attributes (e.g. two log-source channels
-    # feeding the same data component).
+    # (source, type, target) with different attributes (e.g. one analytic naming the
+    # same data component twice under two different log sources).
     seed_parts = [source_ref, relationship_type, target_ref]
     seed_parts.extend(f"{key}={extra[key]}" for key in sorted(extra))
     relationship_uuid = uuid.uuid5(uuid.NAMESPACE_URL, "mitre-attack-preprocessing:" + "|".join(seed_parts))
@@ -338,14 +328,14 @@ def clean_channel(value: Any) -> Optional[str]:
 
 
 def clean_log_source_name(value: Any) -> Optional[str]:
-    """Log source names key their own entity, so they are trimmed here rather than on the
-    way out: three of the 354 upstream names carry a trailing space (`"networkconfig "`)
-    and would otherwise split into a second node alongside their trimmed twin."""
+    """Log source names are deduplicated against each other, so they are trimmed here
+    rather than on the way out: three of the 354 upstream names carry a trailing space
+    (`"networkconfig "`) and would otherwise survive alongside their trimmed twin."""
     return clean_value(value) if isinstance(value, str) else None
 
 
 def build_analytic_relationships(
-    obj: Dict[str, Any], entity_id: Optional[str], id_to_final_id: Dict[str, str], log_source_names: Dict[str, None]
+    obj: Dict[str, Any], entity_id: Optional[str], id_to_final_id: Dict[str, str]
 ) -> List[Dict[str, Any]]:
     if not entity_id:
         return []
@@ -358,10 +348,9 @@ def build_analytic_relationships(
         extra: Dict[str, Any] = {}
         name = clean_log_source_name(log_source.get("name"))
         if name:
-            # every name here is also on some data component's own x_mitre_log_sources,
-            # but register it anyway so log_source_ref can never dangle
-            log_source_names[name] = None
-            extra["log_source_ref"] = LOG_SOURCE_ID_PREFIX + name
+            # the bare code, not a node reference: all 307 names used here also appear in
+            # some data component's own log_sources, which is where they can be looked up
+            extra["log_source"] = name
         channel = clean_channel(log_source.get("channel"))
         if channel:
             extra["channel"] = channel
@@ -369,27 +358,29 @@ def build_analytic_relationships(
     return relationships
 
 
-def build_log_source_relationships(
-    obj: Dict[str, Any], entity_id: Optional[str], log_source_names: Dict[str, None]
-) -> List[Dict[str, Any]]:
-    """Unpack a data component's `x_mitre_log_sources` list-of-{name, channel} maps.
-    `name` is a shared vocabulary -- 348 mostly colon-namespaced codes (`WinEventLog:Security`)
-    reused across components -- so it becomes its own entity, which also gives the
-    `log_source_ref` on `uses_data_component` edges a real node to resolve against.
-    `channel` is free-text analyst prose (43% of values run past 60 characters), so it
-    stays an edge attribute rather than part of the log source's identity."""
-    if not entity_id:
-        return []
-    relationships = []
+def apply_log_sources(obj: Dict[str, Any], record: Dict[str, Any]) -> None:
+    """Fold a data component's `x_mitre_log_sources` list-of-{name, channel} maps into
+    `log_sources`/`log_source_notes` properties. `name` is a shared vocabulary -- 348
+    mostly colon-namespaced codes (`WinEventLog:Security`) -- but a code is a label on the
+    component, not a thing it points at, and as nodes those 348 held nothing except their
+    own name. `channel` is free-text analyst prose that varies per mention, so as edges one
+    pair needed one edge per channel: 3,165 edges carrying only 999 real
+    (component, log source) facts, with `DC0085 -> NSM:Flow` alone repeated 150 times.
+    Flattened, the name is listed once and each channel rides a self-labelling
+    `"name -- channel"` string."""
+    sources, notes = [], []
     for log_source in obj.get("x_mitre_log_sources", []) or []:
         name = clean_log_source_name(log_source.get("name"))
         if not name:
             continue
-        log_source_names[name] = None
+        sources.append(name)
         channel = clean_channel(log_source.get("channel"))
-        extra = {"channel": channel} if channel else {}
-        relationships.append(make_relationship(entity_id, LOG_SOURCE_ID_PREFIX + name, HAS_LOG_SOURCE_RELATIONSHIP_TYPE, **extra))
-    return relationships
+        if channel:
+            notes.append(f"{name}{NOTE_SEPARATOR}{channel}")
+    if sources:
+        record["log_sources"] = list(dict.fromkeys(sources))
+    if notes:
+        record["log_source_notes"] = list(dict.fromkeys(notes))
 
 
 def flatten_mutable_elements(record: Dict[str, Any]) -> None:
@@ -403,7 +394,7 @@ def flatten_mutable_elements(record: Dict[str, Any]) -> None:
     if fields:
         record["x_mitre_mutable_element_fields"] = fields
     notes = [
-        f"{e['field']}{MUTABLE_ELEMENT_NOTE_SEPARATOR}{e['description']}"
+        f"{e['field']}{NOTE_SEPARATOR}{e['description']}"
         for e in elements
         if e.get("field") and e.get("description")
     ]
@@ -467,7 +458,6 @@ def build_derived_relationships(
     final_id: str,
     id_to_final_id: Dict[str, str],
     tactic_by_domain_shortname: Dict[Tuple[str, str], str],
-    log_source_names: Dict[str, None],
 ) -> List[Dict[str, Any]]:
     """Edges derived from embedded fields, for the five types that carry any."""
     if obj_type == "attack-pattern":
@@ -477,9 +467,7 @@ def build_derived_relationships(
     if obj_type == "x-mitre-detection-strategy":
         return build_ref_field_relationships(obj, final_id, id_to_final_id, "x_mitre_analytic_refs", HAS_ANALYTIC_RELATIONSHIP_TYPE)
     if obj_type == "x-mitre-analytic":
-        return build_analytic_relationships(obj, final_id, id_to_final_id, log_source_names)
-    if obj_type == "x-mitre-data-component":
-        return build_log_source_relationships(obj, final_id, log_source_names)
+        return build_analytic_relationships(obj, final_id, id_to_final_id)
     return []
 
 
@@ -497,12 +485,10 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             tactic_by_domain_shortname[(domain, obj.get("x_mitre_shortname"))] = final_id
 
     result: Dict[str, List[Dict[str, Any]]] = {obj_type: [] for obj_type in FIELDS_BY_TYPE}
-    result[LOG_SOURCE_KEY] = []
     result[RELATIONSHIP_KEY] = []
     result[DERIVED_RELATIONSHIP_KEY] = []
     result[EXTERNAL_RELATIONSHIP_KEY] = []
     dropped_counts: Dict[str, int] = {}
-    log_source_names: Dict[str, None] = {}  # insertion-ordered set, sorted at the end
 
     for obj in objects:
         obj_type = str(obj.get("type") or "")
@@ -529,17 +515,15 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             record["type"] = ENTITY_TYPE_LABEL_OVERRIDES[obj_type]
         if obj_type == "x-mitre-analytic":
             flatten_mutable_elements(record)
+        if obj_type == "x-mitre-data-component":
+            apply_log_sources(obj, record)
         result[obj_type].append(record)
 
         if obj_type == "attack-pattern":
             result[EXTERNAL_RELATIONSHIP_KEY].extend(build_capec_relationships(obj, final_id))
         result[DERIVED_RELATIONSHIP_KEY].extend(
-            build_derived_relationships(obj, obj_type, final_id, id_to_final_id, tactic_by_domain_shortname, log_source_names)
+            build_derived_relationships(obj, obj_type, final_id, id_to_final_id, tactic_by_domain_shortname)
         )
-
-    result[LOG_SOURCE_KEY] = [
-        {"id": LOG_SOURCE_ID_PREFIX + name, "type": LOG_SOURCE_KEY, "name": name} for name in sorted(log_source_names)
-    ]
 
     dropped_summary = ", ".join(f"{count} {obj_type}" for obj_type, count in sorted(dropped_counts.items()))
     print(f"[mitre-attack-parser] parsed {len(objects)} merged objects; dropped {dropped_summary or 'nothing'}")

@@ -115,16 +115,14 @@ every link endpoint resolves.
     the `has_member` links CWE builds from its own `HasMember` fields.
   - `x-mitre-detection-strategy.x_mitre_analytic_refs` -> `has_analytic`.
   - `x-mitre-analytic.x_mitre_log_source_references[].x_mitre_data_component_ref`
-    -> `uses_data_component`, with the log source kept as a link attribute
-    (`log_source_ref`) alongside `channel`.
-  - `x-mitre-data-component.x_mitre_log_sources[].name` -> `has_log_source`,
-    with `channel` as a link attribute - see below.
+    -> `uses_data_component`, with the log source name kept as a link attribute
+    (`log_source`) alongside `channel`.
 - `x-mitre-data-source` is **dropped**. A from-scratch grep found zero
   `data_source_ref` anywhere in the bundle, so nothing points at these 42 records
   and they point at nothing - after preprocessing all 42 came out with zero links
   in either direction, and 19 were already `revoked`. The model moved: analytics
-  now reach detection data through `x-mitre-data-component`, which in turn points
-  at `log-source`. Keeping them would add 42 nodes no trace can ever cross, so
+  now reach detection data through `x-mitre-data-component`, which carries its
+  log sources as properties. Keeping them would add 42 nodes no trace can ever cross, so
   they go, the same call made for CAPEC's skill levels and CWE's alias
   "entities". Their 42 names and descriptions are the whole cost.
 - `x-mitre-asset.x_mitre_related_assets` stays an attribute rather than becoming
@@ -144,8 +142,8 @@ every link endpoint resolves.
 - Links built by this script get a fixed `relationship--<uuid5>` id seeded from
   every attribute, not just the triple - some derived links
   (`uses_data_component`) legitimately repeat a triple with different attributes
-  (two log-source channels feeding one data component). Re-runs stay
-  byte-identical.
+  - 57 of its 4,966 analytic/component pairs appear more than once, naming a
+  different log source or channel each time. Re-runs stay byte-identical.
 
 ## Nothing in the output nests
 
@@ -154,28 +152,38 @@ map. ATT&CK had exactly two map-list fields, unpacked differently because the tw
 shapes mean different things.
 
 **`x-mitre-data-component.x_mitre_log_sources`** (3,165 `{name, channel}` maps
-across 114 of 123 components) becomes **`log-source` entities plus
-`has_log_source` links.** `name` is a real shared vocabulary - 348 mostly
-colon-namespaced codes (`WinEventLog:Security`, `AWS:CloudTrail`,
-`macos:unifiedlog`) reused across components - so it earns its own type. That
-also fixes a modelling gap: the log source already carried on 5,042
-`uses_data_component` links was a bare string with no node behind it, and is now
-a `log_source_ref` resolving to a real entity (all 307 names used there are among
-the 348; none dangle). Details:
+across 114 of 123 components) **flattens onto the data component** as a
+`log_sources` list plus a `log_source_notes` list.
 
-- Names are trimmed before they key an entity: three upstream names carry a
-  trailing space (`"networkconfig "`), which would otherwise split each into a
-  second node next to its trimmed twin.
-- A log source's `id` is its name prefixed with its type
-  (`log-source--AWS:CloudTrail`), because 7 of the 348 are bare words (`File`,
-  `Process`, `Network`, `Command`, `Certificate`, `Firmware`, `Metadata`) that
-  D3FEND also uses as artifact ids. Unprefixed, they would be the only ids in
-  the project claimed by two catalogs. The bare name stays as `name`.
-- `channel` stays a *link* attribute rather than part of the identity: 43% of
-  its values run past 60 characters of analyst prose (`"Unusual kinit or klist
-  activity"`), so it is a note about this component's use of that log source,
-  not an identifier. Deleting the field instead would have lost 212
-  `(component, name, channel)` facts and 42 names appearing nowhere else.
+`name` is a real shared vocabulary - 348 mostly colon-namespaced codes
+(`WinEventLog:Security`, `AWS:CloudTrail`, `macos:unifiedlog`) reused across
+components - and it did become its own entity type at first. That was the wrong
+shape. A code is a label on the component, not a thing the component points at,
+and those 348 nodes held nothing but their own name: `{id, type, name}`, with the
+`id` just the `name` with a prefix glued on.
+
+The `channel` field is what made it worse. It is free-text analyst prose (43% of
+values run past 60 characters, `"Unusual kinit or klist activity"`) that varies
+per mention, and as a link attribute it forced one link per channel rather than
+one per fact. The result was **3,165 links carrying only 999 real
+(component, log source) pairs** - `DC0085 -> NSM:Flow` alone repeated **150
+times**, once for each channel string. Flattened, the name is listed once in
+`log_sources` and every channel rides a self-labelling
+`"NSM:Flow -- mqtt.log, xmpp.log, amqp.log"` string in `log_source_notes`, the
+shape `alias_notes` and `mutable_element_notes` already use. Nothing is lost: all
+999 pairs and all 3,081 channel facts survive. Details:
+
+- Names are still trimmed before they are deduplicated: three upstream names
+  carry a trailing space (`"networkconfig "`) and would otherwise survive
+  alongside their trimmed twin.
+- The prefixed id (`log-source--AWS:CloudTrail`) existed because 7 of the 348 are
+  bare words (`File`, `Process`, `Network`, `Command`, `Certificate`, `Firmware`,
+  `Metadata`) that D3FEND also uses as artifact ids - unprefixed they would have
+  been the only ids in the project claimed by two catalogs. With no node, there is
+  no id to collide, and the problem goes away rather than being worked around.
+- The 5,042 `uses_data_component` links keep their log source as a plain
+  `log_source` name instead of a `log_source_ref` id. All 307 names used there
+  also appear in some component's `log_sources`, which is where they resolve.
 
 **`x-mitre-analytic.x_mitre_mutable_elements`** (5,177 `{field, description}`
 maps across 1,793 of 2,066 analytics) becomes **two flat string lists, no new
@@ -187,15 +195,17 @@ queryable is the field name alone (25 are shared by 10+ analytics -
 `x_mitre_mutable_element_fields`. The tuning prose is kept losslessly as
 `x_mitre_mutable_element_notes` - `"field -- description"` strings, chosen over
 two lists lined up by position because nothing keeps two separate lists aligned.
-The ` -- ` separator is verified absent from every field name and description, so
-the notes split back apart cleanly.
+The ` -- ` separator is verified absent from every field name, description, log
+source name and channel, so the notes split back apart cleanly. (51 channels do
+contain `--`, always as a command-line flag like `log stream --predicate`, never
+with a space on both sides.)
 
 One upstream bug is fixed here: 184 raw `x_mitre_log_sources` entries carry the
 **literal string `"None"`** as `channel` instead of JSON `null` (a `str(None)`
 leak on MITRE's side). Left alone it loads as a real value and pollutes any
 `channel` filter, so `clean_channel()` treats `"None"` and blank as "field
-absent" on both link types - 84 and 521 links respectively now simply have no
-`channel`.
+absent" wherever it appears - 521 `uses_data_component` links and the
+component-side entries now simply have no `channel`.
 
 ## Text cleanup
 
@@ -218,7 +228,7 @@ Two ATT&CK-specific details on top of that:
 
 Two JSON files, each a plain list of records.
 
-### `entities.json` - 6,007 records
+### `entities.json` - 5,659 records
 
 | `type` | Count | Contents |
 |---|---|---|
@@ -226,7 +236,6 @@ Two JSON files, each a plain list of records.
 | `attack-technique` | 1,166 | Techniques and sub-techniques (STIX `attack-pattern`) - id, stix_id, name, description, platforms, sub-technique flag, and (ICS only) tactic type, impact type, remote support |
 | `x-mitre-detection-strategy` | 920 | Detection strategies - id, stix_id, name |
 | `malware` | 862 | Malware - id, stix_id, name, description, platforms, aliases, `is_family` |
-| `log-source` | 348 | Log sources - id (`log-source--WinEventLog:Security`), name. Built from data components' embedded maps, so there is no STIX object behind them and no `stix_id` |
 | `intrusion-set` | 193 | Threat groups - id, stix_id, name, description, aliases |
 | `x-mitre-data-component` | 123 | Log data components - id, stix_id, name, description |
 | `attack-mitigation` | 110 | Mitigations (STIX `course-of-action`) - id, stix_id, name, description, compliance-framework labels |
@@ -240,7 +249,7 @@ Two JSON files, each a plain list of records.
 suggest (334 -> 110, 4 -> 3) because of the duplicate-id deletions above, not
 any extra filtering.
 
-### `relationships.json` - 36,346 records
+### `relationships.json` - 33,181 records
 
 Every record is `type: "relationship"` with id, relationship_type, source_ref
 and target_ref. Three origins share the file - ATT&CK's own STIX links, links
@@ -251,8 +260,7 @@ which is which (every type is snake_case now), so the Origin column says it.
 | `relationship_type` | Count | Endpoints | Origin |
 |---|---|---|---|
 | `uses` | 19,988 | group/campaign/malware -> technique, and more | native |
-| `uses_data_component` | 5,042 | analytic -> data-component | derived |
-| `has_log_source` | 3,165 | data-component -> log-source | derived |
+| `uses_data_component` | 5,042 | analytic -> data-component, carrying `log_source` and `channel` | derived |
 | `has_analytic` | 2,066 | detection-strategy -> analytic | derived |
 | `mitigates` | 2,017 | mitigation -> technique | native |
 | `has_tactic` | 1,446 | technique -> tactic | derived |
@@ -264,8 +272,7 @@ which is which (every type is snake_case now), so the Origin column says it.
 | `related_to` | 36 | `T####` -> `CAPEC-N` (`source_name: "capec"`) | external |
 | `attributed_to` | 27 | campaign -> group | native |
 
-Every entity carries `id` and `stix_id` (except `log-source`, which has no
-upstream STIX object), and every link - native, derived and external alike -
-uses those `id` values as endpoints. Checked after every run: none of the 36,346
-rows carries a raw STIX id in either column, and every endpoint resolves to an
-entity that exists.
+Every entity carries `id` and `stix_id`, and every link - native, derived and
+external alike - uses those `id` values as endpoints. Checked after every run:
+none of the 33,181 rows carries a raw STIX id in either column, and every
+endpoint resolves to an entity that exists.
