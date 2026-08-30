@@ -66,27 +66,33 @@ Every value in the output is a single value or a list of single values, never a
 map. CAPEC had two map-valued fields.
 
 **`x_capec_consequences`** - a scope-to-impacts map on 369 attack patterns -
-becomes **46 `consequence` entities plus 1,563 `has_consequence` links**,
-reusing CWE's existing model rather than inventing a new one:
+**flattens onto the attack pattern** as a `consequences` list, with a matching
+`consequence_notes` list where CAPEC supplies an explanation:
 
-- CWE's preprocessor already writes `consequence` records with exactly the
-  `{id, type, scope, impact}` shape and its own `has_consequence` links. A
-  consequence means the same thing in both catalogs, so both use one record type.
-  (This is the opposite of the `attack-pattern` case, where CAPEC and ATT&CK use
-  one STIX type for two genuinely different things and are kept apart.) Ids stay per-catalog, because these preprocessors run independently
-  and cannot share an id space - so the 4 `(scope, impact)` pairs both catalogs
-  use become one node each per catalog.
+- It used to become 46 shared `(scope, impact)` nodes plus 1,563
+  `has_consequence` links, mirroring CWE's model. That was the wrong shape here.
+  A scope/impact pair is a label on an attack pattern, not a thing the pattern
+  points at, and those 46 nodes held nothing but the pair itself while absorbing
+  1,563 links from 368 patterns - `Confidentiality: Read Data` alone would pull
+  in over a hundred unrelated patterns in a single hop. The same objection
+  retired CAPEC's alias "entities" and CWE's introduction phases.
+- Each entry reads `"Confidentiality: Read Data"` - scope, then impact.
 - CAPEC glues an explanation onto the impact code in brackets:
   `"Execute Unauthorized Commands (The attacker may be able to ...)"`. Splitting
-  that collapses 134 distinct impact strings down to the 10 real codes and moves
-  the explanation onto the link's `note` (394 of the 1,563 links have one),
-  which is where CWE already keeps the same kind of text. Verified safe: no
-  impact code contains a bracket, and every bracket closes at the end of the
-  string.
+  that collapses 134 distinct impact strings down to the 10 real codes, and the
+  explanation is kept as a self-labelling
+  `"Availability: Unreliable Execution -- The attacker may be able to ..."`
+  string in `consequence_notes` (394 of the 1,563), the same shape CWE's
+  `alias_notes` uses. Nothing has to stay lined up by position, and it survives
+  one pattern giving the same pair two different notes. Verified safe: no impact
+  code contains a bracket, and every bracket closes at the end of the string.
 - CAPEC writes `Access_Control` where CWE writes `Access Control`; normalized to
   CWE's spelling, which makes CAPEC's 9 scope values an exact subset of CWE's.
-  `CAPEC-132` lists the same `(Integrity, Modify Data)` twice, hence 1,563 links
-  from 1,564 pairs.
+  `CAPEC-132` lists the same `(Integrity, Modify Data)` twice, hence 1,563
+  entries from 1,564 pairs.
+- CWE's own `consequence` nodes stay as they are. There the pair carries
+  per-weakness `Likelihood` and `Note` on the link and is deduplicated across
+  1,237 uses, so it still behaves like a shared record; CAPEC's never did.
 
 **`x_capec_skills_required`** - a skill-level-to-prose map on 296 attack
 patterns - is **dropped**, not converted. It used to become 3 `skill-level`
@@ -120,22 +126,20 @@ spacing between words and stays.
 
 Two JSON files, each a plain list of records.
 
-### `entities.json` - 1,538 records
+### `entities.json` - 1,492 records
 
 | `type` | Count | Contents |
 |---|---|---|
 | `course-of-action` | 877 | Mitigations - id (a STIX id; CAPEC does not number these), name, description, created, modified. CAPEC's `name` here is a generic placeholder, not a real title |
-| `attack-pattern` | 615 | Attack patterns - id (`CAPEC-N`), stix_id, name, description, created, modified, `abstraction`, `extended_description`, `aliases`, and the remaining `x_capec_*` fields (domains, prerequisites, typical severity, likelihood of attack, resources required, example instances) |
-| `consequence` | 46 | Distinct `(scope, impact)` pairs, same shape and `type` as CWE's - id (`consequence--<uuid5>`), scope, impact |
+| `attack-pattern` | 615 | Attack patterns - id (`CAPEC-N`), stix_id, name, description, created, modified, `abstraction`, `extended_description`, `aliases`, and the remaining `x_capec_*` fields (domains, prerequisites, typical severity, likelihood of attack, resources required, example instances), plus `consequences` and `consequence_notes` |
 
-### `relationships.json` - 4,930 records
+### `relationships.json` - 3,367 records
 
 Every record is `type: "relationship"` with id, relationship_type, source_ref
 and target_ref.
 
 | `relationship_type` | Count | Endpoints |
 |---|---|---|
-| `has_consequence` | 1,563 | attack-pattern -> consequence, with the split-out `note` on 394 |
 | `related_to` | 1,483 | `CAPEC-N` -> `CWE-N` or `T####`, from each attack pattern's `cwe`/`ATTACK` references. The only links carrying `source_name` |
 | `mitigates` | 1,172 | course-of-action -> attack-pattern (STIX id -> `CAPEC-N`). The only links that keep their upstream STIX id, and the only ones carrying `created`/`modified` |
 | `child_of` | 533 | attack-pattern -> attack-pattern (one direction; `parent_of` is its exact mirror) |

@@ -1,8 +1,8 @@
 """CAPEC field-projection preprocessor. Full rationale in README.md.
 
 Reads the CAPEC crawler's STIX 2.1 bundle (`data-acquisition/CAPEC/latest.json`)
-and writes two files: `entities.json` (attack patterns, courses of action,
-consequences) and `relationships.json` (every edge). Each record's own `type`
+and writes two files: `entities.json` (attack patterns and courses of action)
+and `relationships.json` (every edge). Each record's own `type`
 says which kind it is. `identity`/`marking-definition` are dropped as STIX
 boilerplate.
 
@@ -13,9 +13,11 @@ outward edges carrying `source_name`; the bibliographic ones are dropped.
 
 Fields that don't survive verbatim: `x_capec_status`, `x_capec_execution_flow`
 and `x_capec_skills_required` are dropped; `x_capec_alternate_terms` folds into
-an `aliases` property; `x_capec_consequences` (a map, and nothing in the
-output nests) unpacks into shared `consequence` entities plus `has_consequence`
-edges; the attack-pattern ref fields become edges, keeping one direction of each
+an `aliases` property; `x_capec_consequences` (a map, and nothing in the output
+nests) flattens into `consequences`/`consequence_notes` lists on the attack
+pattern -- a scope/impact pair is a label, not a thing to point at, and as 46
+shared nodes it was a hub absorbing 1,563 edges from 368 patterns; the
+attack-pattern ref fields become edges, keeping one direction of each
 reciprocal pair (`child_of`, `can_precede`) and one edge per unordered `peer_of`
 pair.
 
@@ -80,13 +82,13 @@ HIERARCHY_REF_FIELDS: Dict[str, str] = {
 }
 
 PEER_OF_RELATIONSHIP_TYPE = "peer_of"
-HAS_CONSEQUENCE_RELATIONSHIP_TYPE = "has_consequence"
 ATTACK_PATTERN_RELATIONSHIP_KEY = "attack-pattern-relationship"
 
-# Deliberately the same `type` (and {scope, impact} shape) CWE's preprocessor emits, so
-# both catalogs' consequences share one record type. Ids stay per-catalog: these
-# preprocessors run independently and can't share an id space.
-CONSEQUENCE_ENTITY_TYPE = "consequence"
+# Consequences read as `"Confidentiality: Read Data"`, and where CAPEC supplies the
+# parenthetical explanation, `"Confidentiality: Read Data -- the attacker can ..."` --
+# the same self-labelling shape CWE uses for its alias and introduction notes.
+CONSEQUENCE_SEPARATOR = ": "
+NOTE_SEPARATOR = " -- "
 
 # CAPEC writes this scope with an underscore where CWE writes a space.
 CONSEQUENCE_SCOPE_ALIASES: Dict[str, str] = {"Access_Control": "Access Control"}
@@ -293,35 +295,28 @@ def split_impact(value: str) -> Tuple[str, Optional[str]]:
     return value[:index], value[index + 2:].rstrip()[:-1]
 
 
-def build_consequence_relationships(
-    obj: Dict[str, Any],
-    capec_id: int,
-    consequence_ids: Dict[Tuple[str, str], str],
-    consequences: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Unpack `x_capec_consequences` (a scope -> impact-list map) into one edge per
-    (scope, impact) pair, pointing at a `consequence` entity shared across every
-    attack pattern with that pair."""
-    source_ref = f"CAPEC-{capec_id}"
-    relationships = []
-    seen = set()
+def apply_consequences(obj: Dict[str, Any], record: Dict[str, Any]) -> None:
+    """Fold `x_capec_consequences` (a scope -> impact-list map) into
+    `consequences`/`consequence_notes` properties, the same treatment `aliases` gets.
+    As nodes these were 46 (scope, impact) pairs holding nothing but the pair itself,
+    and they absorbed 1,563 edges from 368 attack patterns: `Confidentiality: Read Data`
+    is a label on an attack pattern, not a thing it points at, and as a node it was a hub
+    every traversal then had to route around. The 394 parenthetical explanations keep
+    their pairing as `"scope: impact -- note"` strings, which also survives one pattern
+    giving the same pair two different notes."""
+    consequences, notes = [], []
     for raw_scope, impacts in (obj.get("x_capec_consequences") or {}).items():
         scope = CONSEQUENCE_SCOPE_ALIASES.get(raw_scope, raw_scope)
         for raw_impact in impacts:
             impact, note = split_impact(raw_impact)
-            if (scope, impact, note) in seen:
-                continue  # one attack pattern lists the same pair twice upstream
-            seen.add((scope, impact, note))
-            entity_id = consequence_ids.get((scope, impact))
-            if entity_id is None:
-                entity_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"capec-preprocessing:{CONSEQUENCE_ENTITY_TYPE}:scope={scope}|impact={impact}")
-                entity_id = f"{CONSEQUENCE_ENTITY_TYPE}--{entity_uuid}"
-                consequence_ids[(scope, impact)] = entity_id
-                # lists of one, matching CWE's consequence records, which can carry several
-                consequences.append({"id": entity_id, "type": CONSEQUENCE_ENTITY_TYPE, "scope": [scope], "impact": [impact]})
-            extra = {"note": note} if note else {}
-            relationships.append(make_relationship(source_ref, entity_id, HAS_CONSEQUENCE_RELATIONSHIP_TYPE, **extra))
-    return relationships
+            label = f"{scope}{CONSEQUENCE_SEPARATOR}{impact}"
+            consequences.append(label)
+            if note:
+                notes.append(f"{label}{NOTE_SEPARATOR}{note}")
+    if consequences:
+        record["consequences"] = list(dict.fromkeys(consequences))
+    if notes:
+        record["consequence_notes"] = list(dict.fromkeys(notes))
 
 
 def build_peer_relationships(attack_patterns: Sequence[Dict[str, Any]], id_to_capec_id: Dict[str, int]) -> List[Dict[str, Any]]:
@@ -352,6 +347,7 @@ def build_attack_pattern_record(obj: Dict[str, Any], capec_id: int) -> Dict[str,
         elif field in obj:
             record[FIELD_NAME_OVERRIDES.get(field, field)] = obj[field]
     apply_alternate_terms(obj, record)
+    apply_consequences(obj, record)
     return record
 
 
@@ -361,10 +357,8 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
 
     result: Dict[str, List[Dict[str, Any]]] = {obj_type: [] for obj_type in FIELDS_BY_TYPE}
     result[EXTERNAL_RELATIONSHIP_KEY] = []
-    result[CONSEQUENCE_ENTITY_TYPE] = []
     result[ATTACK_PATTERN_RELATIONSHIP_KEY] = build_peer_relationships(attack_patterns, id_to_capec_id)
     dropped_counts: Dict[str, int] = {}
-    consequence_ids: Dict[Tuple[str, str], str] = {}
 
     for obj in objects:
         obj_type = str(obj.get("type") or "")
@@ -373,9 +367,6 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             result["attack-pattern"].append(build_attack_pattern_record(obj, capec_id))
             result[EXTERNAL_RELATIONSHIP_KEY].extend(build_external_relationships(obj, capec_id))
             result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(build_hierarchy_relationships(obj, capec_id, id_to_capec_id))
-            result[ATTACK_PATTERN_RELATIONSHIP_KEY].extend(
-                build_consequence_relationships(obj, capec_id, consequence_ids, result[CONSEQUENCE_ENTITY_TYPE])
-            )
             continue
         if obj_type == "relationship":
             record = filter_object(obj, RELATIONSHIP_FIELDS)
@@ -391,8 +382,6 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
         if obj_type not in DROPPED_TYPES:
             print(f"[capec-parser] warning: skipping unexpected object type '{obj_type}'", file=sys.stderr)
         dropped_counts[obj_type] = dropped_counts.get(obj_type, 0) + 1
-
-    result[CONSEQUENCE_ENTITY_TYPE].sort(key=lambda record: record["id"])
 
     dropped_summary = ", ".join(f"{count} {obj_type}" for obj_type, count in sorted(dropped_counts.items()))
     print(f"[capec-parser] parsed {len(objects)} objects; dropped {dropped_summary or 'nothing'}")
