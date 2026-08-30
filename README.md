@@ -69,7 +69,7 @@ cd ../data-preprocessing && py main.py                  # clean it again
 | Source | What it adds | Entities | Links | Comes from |
 |---|---|---|---|---|
 | **CVE** (NVD) | Real, specific vulnerabilities, plus their severity scores | 359,355 | 336,339 | NVD REST API 2.0 |
-| **MITRE ATT&CK** | What attackers do: techniques, malware, groups, detections | 6,049 | 36,346 | TAXII 2.1 |
+| **MITRE ATT&CK** | What attackers do: techniques, malware, groups, detections | 6,007 | 36,346 | TAXII 2.1 |
 | **CWE** | Kinds of software weakness, and how to fix them | 5,040 | 16,941 | Versioned XML catalog |
 | **CAPEC** | Attack patterns: how a weakness gets abused | 1,492 | 3,367 | Pre-built STIX bundle |
 | **MITRE D3FEND** | Defences, and what each one counters | 1,193 | 6,471 | D3FEND REST API |

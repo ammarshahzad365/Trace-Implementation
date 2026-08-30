@@ -35,8 +35,8 @@ that ever differed.)
 ## Ids are the readable ATT&CK id, not the STIX id
 
 Like the project's other four sources, entities are keyed by a readable id -
-`T1055`, `T1003.008`, `S0002`, `G0016`, `M1013`, `C0028`, `TA0009`, `DS0026`,
-`DET0210`, `AN0001`, `DC0103`, `A0008`, or a matrix's own domain string. It is
+`T1055`, `T1003.008`, `S0002`, `G0016`, `M1013`, `C0028`, `TA0009`, `DET0210`,
+`AN0001`, `DC0103`, `A0008`, or a matrix's own domain string. It is
 taken from the `mitre-attack` entry in `external_references` (or, on a few old
 revoked/deprecated records, `mitre-ics-attack` / `mitre-mobile-attack`). The
 STIX id is kept as `stix_id`, the same convention CAPEC and CVE use. An entity
@@ -119,10 +119,14 @@ every link endpoint resolves.
     (`log_source_ref`) alongside `channel`.
   - `x-mitre-data-component.x_mitre_log_sources[].name` -> `has_log_source`,
     with `channel` as a link attribute - see below.
-- `x-mitre-data-source` is kept as a plain entity list with no links to
-  `x-mitre-data-component`: a from-scratch grep found zero `data_source_ref`
-  anywhere, so the two have no formal connection left in this release. The type
-  looks legacy now that analytics point straight at data components.
+- `x-mitre-data-source` is **dropped**. A from-scratch grep found zero
+  `data_source_ref` anywhere in the bundle, so nothing points at these 42 records
+  and they point at nothing - after preprocessing all 42 came out with zero links
+  in either direction, and 19 were already `revoked`. The model moved: analytics
+  now reach detection data through `x-mitre-data-component`, which in turn points
+  at `log-source`. Keeping them would add 42 nodes no trace can ever cross, so
+  they go, the same call made for CAPEC's skill levels and CWE's alias
+  "entities". Their 42 names and descriptions are the whole cost.
 - `x-mitre-asset.x_mitre_related_assets` stays an attribute rather than becoming
   links: it names narrower device sub-types as free text (41 of 43 match no
   other asset's `name` at all - e.g. `Application Server` -> `File Server`), not
@@ -214,7 +218,7 @@ Two ATT&CK-specific details on top of that:
 
 Two JSON files, each a plain list of records.
 
-### `entities.json` - 6,049 records
+### `entities.json` - 6,007 records
 
 | `type` | Count | Contents |
 |---|---|---|
@@ -228,7 +232,6 @@ Two JSON files, each a plain list of records.
 | `attack-mitigation` | 110 | Mitigations (STIX `course-of-action`) - id, stix_id, name, description, compliance-framework labels |
 | `tool` | 97 | Tools - id, stix_id, name, description, platforms, aliases |
 | `campaign` | 60 | Named campaigns - id, stix_id, name, description, aliases, first/last seen |
-| `x-mitre-data-source` | 42 | Log data sources - id, stix_id, name, description, collection layers, platforms |
 | `x-mitre-tactic` | 41 | Tactics - id, stix_id, name, description |
 | `x-mitre-asset` | 18 | ICS physical and logical assets - id, stix_id, name, description, platforms, sectors |
 | `x-mitre-matrix` | 3 | Matrix groupings - id, stix_id, name, description |

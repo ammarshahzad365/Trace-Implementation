@@ -4,7 +4,7 @@ Merges the three raw STIX 2.1 bundles from the ATT&CK crawler
 (`data-acquisition/mitre-attack/{enterprise,mobile,ics}/latest.json`) into two
 deduplicated files: `entities.json` (techniques, malware, tools, groups,
 campaigns, mitigations, tactics, matrices, analytics, detection strategies, data
-components, data sources, assets, log sources) and `relationships.json` (every
+components, assets, log sources) and `relationships.json` (every
 edge). Each record's own `type` says which kind it is. Entities are keyed by
 their human-readable ATT&CK code (`T1055`, `S0002`) rather than STIX id, which
 moves to `stix_id` -- see `resolve_canonical_ids()`.
@@ -47,6 +47,14 @@ DOMAIN_LATEST_FILES: Tuple[str, ...] = ("enterprise/latest.json", "mobile/latest
 
 BOILERPLATE_TYPES = {"identity", "marking-definition", "x-mitre-collection"}
 
+# Dropped on purpose, and not boilerplate. Recent ATT&CK stopped pointing a data component
+# at its data source -- `x_mitre_data_source_ref` is on 0 of the 109 raw components -- and
+# replaced that model with `x_mitre_log_sources`, which this parser follows. Nothing else
+# in the bundle references a data-source id either, so all 42 came out with zero
+# relationships in either direction (19 of them revoked): unreachable nodes, no trace ever
+# crossing them. The same call was made for CAPEC's skill levels.
+DROPPED_TYPES = {"x-mitre-data-source"}
+
 # external_reference source_name values that carry an object's own ATT&CK code.
 ATTACK_ID_SOURCE_NAMES = {"mitre-attack", "mitre-ics-attack", "mitre-mobile-attack"}
 
@@ -84,7 +92,6 @@ MATRIX_FIELDS: Tuple[str, ...] = COMMON_FIELDS  # tactic_refs extracted to deriv
 ANALYTIC_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_platforms", "x_mitre_mutable_elements")
 DETECTION_STRATEGY_FIELDS: Tuple[str, ...] = COMMON_FIELDS  # x_mitre_analytic_refs extracted
 DATA_COMPONENT_FIELDS: Tuple[str, ...] = COMMON_FIELDS  # x_mitre_log_sources extracted
-DATA_SOURCE_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_collection_layers", "x_mitre_platforms")
 ASSET_FIELDS: Tuple[str, ...] = COMMON_FIELDS + ("x_mitre_platforms", "x_mitre_sectors")
 
 RELATIONSHIP_PASSTHROUGH_FIELDS: Tuple[str, ...] = ("id", "type", "relationship_type", "source_ref", "target_ref", "description", "created", "modified")
@@ -101,7 +108,6 @@ FIELDS_BY_TYPE: Dict[str, Tuple[str, ...]] = {
     "x-mitre-analytic": ANALYTIC_FIELDS,
     "x-mitre-detection-strategy": DETECTION_STRATEGY_FIELDS,
     "x-mitre-data-component": DATA_COMPONENT_FIELDS,
-    "x-mitre-data-source": DATA_SOURCE_FIELDS,
     "x-mitre-asset": ASSET_FIELDS,
 }
 
@@ -508,7 +514,7 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             continue
 
         if obj_type not in FIELDS_BY_TYPE:
-            if obj_type not in BOILERPLATE_TYPES:
+            if obj_type not in BOILERPLATE_TYPES and obj_type not in DROPPED_TYPES:
                 print(f"[mitre-attack-parser] warning: skipping unexpected object type '{obj_type}'", file=sys.stderr)
             dropped_counts[obj_type] = dropped_counts.get(obj_type, 0) + 1
             continue
