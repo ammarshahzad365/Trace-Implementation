@@ -124,17 +124,27 @@ the one exception is a single `CWE-597` mitigation whose source `Description` is
 an empty `<br/><br/>` element with no words in it. Unnamed platform entries get a private
 node the same way, keeping only `category`, which is always present.
 
-The same logic turned out to fit two fields that were not expected to behave
-like a catalog: `CommonConsequences.Consequence` (deduplicated by
-`(scope, impact)` - 113 of 311 distinct combinations appear on more than one
-weakness, covering 1,039 of 1,237 entries) and `ModesOfIntroduction.Introduction`
-(deduplicated by `Phase` - only 16 distinct phases across 1,398 entries).
-`Likelihood`/`Note` on consequences and `Note` on introductions are per-weakness
-commentary, so they live on the link.
+The same logic turned out to fit one field that was not expected to behave like
+a catalog: `CommonConsequences.Consequence`, deduplicated by `(scope, impact)` -
+113 of 311 distinct combinations appear on more than one weakness, covering
+1,039 of 1,237 entries. `Likelihood` and `Note` are per-weakness commentary, so
+they live on the link.
 
-`WeaknessOrdinalities` does **not** get this treatment: its only real sub-field
-is `Ordinality` (Primary/Resultant/Indirect), the rare `Description` sibling (2%
-of entries) is dropped, and it flattens in place to a plain list on the weakness.
+Two fields do **not** get this treatment, because what looks like their identity
+is a vocabulary term rather than a thing - the same objection that retired
+`also_known_as` above. `WeaknessOrdinalities` has one real sub-field,
+`Ordinality` (Primary/Resultant/Indirect); the rare `Description` sibling (2% of
+entries) is dropped and it flattens to a plain list on the weakness.
+`ModesOfIntroduction.Introduction` did become nodes at first, and it was a
+mistake: 16 phases, each holding nothing but its own name, between them absorbing
+1,398 links from 944 weaknesses. "Implementation" is a label on a weakness, not
+an entity it relates to, and as a node it was a hub that every traversal then had
+to route around - `Implementation` alone would pull in several hundred unrelated
+weaknesses in one hop. It now flattens to `modes_of_introduction` on the
+weakness, with the 433 `Note` entries kept as self-labelling `"phase -- note"`
+strings in `introduction_notes`, the same shape `alias_notes` uses. That form
+also survives a weakness listing one phase twice with two different notes, which
+`CWE-15` does.
 
 Every sub-entity gets a fixed `<entity-type>--<uuid5>` id, built from its natural
 identity where it has one (so repeat references land on the same node) or from
@@ -189,7 +199,7 @@ Two CWE-specific details on top of that:
 
 Two JSON files, each a plain list of records.
 
-### `entities.json` - 5,056 records
+### `entities.json` - 5,040 records
 
 The first three are CWE's own kinds; the rest are sub-records lifted out of
 `weakness`.
@@ -198,14 +208,13 @@ The first three are CWE's own kinds; the rest are sub-records lifted out of
 |---|---|---|
 | `platform` | 1,527 | Deduplicated `(category, name)` platforms, plus private nodes for unnamed entries - id, category, name |
 | `mitigation` | 1,253 | 70 deduplicated by `Mitigation_ID`, plus 1,183 private per-weakness nodes - phase, strategy, effectiveness, description, effectiveness_notes; the shared ones also carry mitigation_id |
-| `weakness` | 969 | CWE weaknesses - id, name, description, extended description, abstraction/structure/status, ordinalities, likelihood of exploit, background details, affected resources, functional areas, aliases + alias notes |
+| `weakness` | 969 | CWE weaknesses - id, name, description, extended description, abstraction/structure/status, ordinalities, likelihood of exploit, background details, affected resources, functional areas, modes of introduction + introduction notes, aliases + alias notes |
 | `detection-method` | 499 | 23 deduplicated by `Detection_Method_ID`, plus 476 private nodes - method, effectiveness, description, effectiveness_notes; the shared ones also carry detection_method_id |
 | `category` | 422 | Groupings - id, name, summary |
 | `consequence` | 311 | Deduplicated `(scope, impact)` pairs - id, scope, impact |
 | `view` | 59 | Groupings for browsing and filtering - id, name, objective, `view_type`, audience |
-| `introduction` | 16 | Deduplicated introduction phases - id, phase |
 
-### `relationships.json` - 18,339 records
+### `relationships.json` - 16,941 records
 
 Every record is `type: "relationship"` with id, relationship_type, source_ref
 and target_ref. The 4,337 `related_to` links point *outside* this bundle and are
@@ -217,7 +226,6 @@ the only ones carrying `source_name`.
 | `related_to` | 4,337 | weakness -> CVE (3,125, from `ObservedExamples`) or -> CAPEC (1,212, from `RelatedAttackPatterns`) |
 | `applies_to_platform` | 2,072 | weakness -> platform |
 | `has_mitigation` | 1,710 | weakness -> mitigation |
-| `introduced_in` | 1,398 | weakness -> introduction |
 | `child_of` | 1,318 | weakness -> weakness |
 | `has_consequence` | 1,237 | weakness -> consequence |
 | `has_detection_method` | 959 | weakness -> detection-method |

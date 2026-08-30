@@ -94,7 +94,7 @@ when the question is *"where did this field come from?"* rather than *"how does
 this source work?"*. Two formats, same subject:
 
 - [`DATA_PROVENANCE_REPORT.docx`](DATA_PROVENANCE_REPORT.docx) - one numbered
-  section per type (29 entity types, 40 relationship groups), each showing a real
+  section per type (28 entity types, 39 relationship groups), each showing a real
   raw record, the same thing after preprocessing, and a field-by-field table of
   what changed. Editable in Word.
 - [`DATA_PROVENANCE_REPORT.md`](DATA_PROVENANCE_REPORT.md) - the same ground

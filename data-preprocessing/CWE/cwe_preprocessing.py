@@ -16,8 +16,8 @@ other taxonomies referenced by `TaxonomyMappings`/`ObservedExamples` are dropped
 
 Sub-records whose identity is reused across weaknesses become shared nodes:
 platforms by `(category, name)`, mitigations by `Mitigation_ID`, detection
-methods by `Detection_Method_ID`, consequences by `(scope, impact)`,
-introductions by `Phase`. The content alongside that identity can vary per
+methods by `Detection_Method_ID`, consequences by `(scope, impact)`. The
+content alongside that identity can vary per
 referencing weakness, so it is copied onto the edge -- same convention
 `RelatedWeaknesses` already uses for `ordinal`/`view_id` -- but the shared node
 keeps its own copy too, taken from its first use in document order. A node that
@@ -25,8 +25,13 @@ held nothing but `Mitigation_ID` would be unreadable on its own and unusable as
 an embedding target, and the variation is the exception rather than the rule
 anyway (30 of 70 mitigation ids, 9 of 23 detection-method ids). Sub-records with
 no natural key get a private per-occurrence node carrying the detail directly.
-Either way, every node carries readable content. `WeaknessOrdinalities` is the
-exception: it flattens in place to a plain array, no new node type.
+Either way, every node carries readable content. Three fields are the exception
+and flatten in place instead, because their "identity" is a vocabulary term, not
+a thing: `WeaknessOrdinalities` becomes a plain array, `AlternateTerms` becomes
+`aliases`/`alias_notes`, and `ModesOfIntroduction` becomes
+`modes_of_introduction`/`introduction_notes`. A phase like "Implementation" is a
+label on the weakness, and as a node it was 1 of 16 hubs soaking up 1,398 edges
+from 944 weaknesses while holding nothing but its own name.
 
 XHTML-shaped rich text (`ExtendedDescription`, `BackgroundDetails`, a view's
 `Objective`, and the `Description`/`EffectivenessNotes` sub-fields) is formatting,
@@ -86,11 +91,10 @@ NATURE_TO_RELATIONSHIP_TYPE: Dict[str, str] = {
 HAS_MEMBER_RELATIONSHIP_TYPE = "has_member"
 HAS_CONSEQUENCE_RELATIONSHIP_TYPE = "has_consequence"
 APPLIES_TO_PLATFORM_RELATIONSHIP_TYPE = "applies_to_platform"
-INTRODUCED_IN_RELATIONSHIP_TYPE = "introduced_in"
 HAS_MITIGATION_RELATIONSHIP_TYPE = "has_mitigation"
 HAS_DETECTION_METHOD_RELATIONSHIP_TYPE = "has_detection_method"
 
-ALIAS_NOTE_SEPARATOR = " -- "
+NOTE_SEPARATOR = " -- "
 
 # CWE's XML is PascalCase; output is snake_case like every other source here. A view's
 # `Type` would collide with the `type` discriminator, so it becomes `view_type`.
@@ -115,14 +119,12 @@ EXTERNAL_RELATIONSHIP_KEY = "external-relationship"
 # where the source has one and per-occurrence otherwise (see get_or_create_entity).
 CONSEQUENCE_ENTITY_TYPE = "consequence"
 PLATFORM_ENTITY_TYPE = "platform"
-INTRODUCTION_ENTITY_TYPE = "introduction"
 MITIGATION_ENTITY_TYPE = "mitigation"
 DETECTION_METHOD_ENTITY_TYPE = "detection-method"
 
 SUB_ENTITY_TYPES: Tuple[str, ...] = (
     CONSEQUENCE_ENTITY_TYPE,
     PLATFORM_ENTITY_TYPE,
-    INTRODUCTION_ENTITY_TYPE,
     MITIGATION_ENTITY_TYPE,
     DETECTION_METHOD_ENTITY_TYPE,
 )
@@ -336,6 +338,7 @@ def build_weakness_record(obj: Dict[str, Any]) -> Dict[str, Any]:
         if ordinalities:
             record["WeaknessOrdinalities"] = ordinalities
 
+    apply_modes_of_introduction(obj, record)
     apply_alternate_terms(obj, record)
     return record
 
@@ -374,6 +377,29 @@ def build_related_weakness_relationships(obj: Dict[str, Any]) -> List[Dict[str, 
     return relationships
 
 
+def apply_modes_of_introduction(obj: Dict[str, Any], record: Dict[str, Any]) -> None:
+    """Fold `ModesOfIntroduction` into `modes_of_introduction`/`introduction_notes`
+    properties, the same shape `apply_alternate_terms` produces. As nodes the 16 phases
+    held nothing but their own name and still absorbed 1,398 edges from 944 weaknesses --
+    a controlled vocabulary dressed up as an entity, and a hub every traversal then has to
+    route around. The 433 entries carrying a note keep it as a self-labelling
+    `"phase -- note"` string rather than a second index-aligned list, which also survives
+    the case of one weakness listing the same phase twice with different notes."""
+    phases, notes = [], []
+    for item in as_list(obj.get("ModesOfIntroduction", {}).get("Introduction")):
+        phase = item.get("Phase")
+        if not phase:
+            continue
+        phases.append(phase)
+        note = flatten_xhtml(item.get("Note"))
+        if note:
+            notes.append(f"{phase}{NOTE_SEPARATOR}{note}")
+    if phases:
+        record["modes_of_introduction"] = list(dict.fromkeys(phases))
+    if notes:
+        record["introduction_notes"] = notes
+
+
 def apply_alternate_terms(obj: Dict[str, Any], record: Dict[str, Any]) -> None:
     """Fold `AlternateTerms` into `aliases`/`alias_notes` properties, the same `aliases`
     ATT&CK/CAPEC/D3FEND records carry. As edges these 189 pointed at the alias text
@@ -388,7 +414,7 @@ def apply_alternate_terms(obj: Dict[str, Any], record: Dict[str, Any]) -> None:
         terms.append(term)
         note = flatten_xhtml(item.get("Description"))
         if note:
-            notes.append(f"{term}{ALIAS_NOTE_SEPARATOR}{note}")
+            notes.append(f"{term}{NOTE_SEPARATOR}{note}")
     if terms:
         record["aliases"] = list(dict.fromkeys(terms))
     if notes:
@@ -491,24 +517,6 @@ def build_platform_relationships(
     return relationships
 
 
-def build_introduction_relationships(
-    obj: Dict[str, Any],
-    dedup_registry: Dict[str, Dict[str, str]],
-    entities_by_type: Dict[str, List[Dict[str, Any]]],
-) -> List[Dict[str, Any]]:
-    source_ref = f"CWE-{obj['cwe_id']}"
-    relationships = []
-    for item in as_list(obj.get("ModesOfIntroduction", {}).get("Introduction")):
-        phase = item.get("Phase")
-        if not phase:
-            continue
-        entity_id = get_or_create_entity(dedup_registry, entities_by_type, INTRODUCTION_ENTITY_TYPE, phase, {"phase": phase})
-        note = flatten_xhtml(item.get("Note"))
-        extra = {"note": note} if note else {}
-        relationships.append(make_relationship(source_ref, entity_id, INTRODUCED_IN_RELATIONSHIP_TYPE, **extra))
-    return relationships
-
-
 def build_detail_relationships(
     obj: Dict[str, Any],
     dedup_registry: Dict[str, Dict[str, str]],
@@ -574,7 +582,6 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
             result[RELATIONSHIP_KEY].extend(build_related_weakness_relationships(obj))
             result[RELATIONSHIP_KEY].extend(build_consequence_relationships(obj, dedup_registry, result))
             result[RELATIONSHIP_KEY].extend(build_platform_relationships(obj, dedup_registry, result))
-            result[RELATIONSHIP_KEY].extend(build_introduction_relationships(obj, dedup_registry, result))
             result[RELATIONSHIP_KEY].extend(
                 build_detail_relationships(
                     obj, dedup_registry, result, "PotentialMitigations", "Mitigation", MITIGATION_ENTITY_TYPE,
