@@ -26,10 +26,14 @@ own output) and `--output-dir` (default: this folder).
   - the `source_name == "capec"` entry (always exactly one) gives the record its
     `id`. Attack patterns are keyed `CAPEC-N` everywhere in this project; the
     STIX id is kept alongside as `stix_id` and used as a join key for nothing.
-  - `cwe` and `ATTACK` entries become links carrying `source_name`, which is
-    what marks a link as pointing outside this catalog. Three attack patterns
-    list the same reference twice upstream, so 1,486 entries produce 1,483
-    links.
+  - `ATTACK` entries become links carrying `source_name`, which is what marks a
+    link as pointing outside this catalog. One attack pattern lists the same
+    reference twice upstream, so 272 entries produce 271 links.
+  - `cwe` entries are dropped. CWE's own `RelatedAttackPatterns` field is their
+    exact mirror -- both sides produce the same 1,212 CWE/CAPEC pairs, nothing
+    missing from either -- so keeping these stored every one of those links
+    twice, once per catalog. CWE keeps its `CWE-N -> CAPEC-N` direction, the
+    forward direction of the CVE -> CWE -> CAPEC -> ATT&CK chain.
   - `reference_from_CAPEC`, `OWASP Attacks` and `WASC` entries are just
     citations with no matching entity here, and are dropped.
 - Native `relationship` records (`mitigates`) keep their STIX `id`, but any
@@ -133,14 +137,14 @@ Two JSON files, each a plain list of records.
 | `course-of-action` | 877 | Mitigations - id (a STIX id; CAPEC does not number these), name, description, created, modified. CAPEC's `name` here is a generic placeholder, not a real title |
 | `attack-pattern` | 615 | Attack patterns - id (`CAPEC-N`), stix_id, name, description, created, modified, `abstraction`, `extended_description`, `aliases`, and the remaining `x_capec_*` fields (domains, prerequisites, typical severity, likelihood of attack, resources required, example instances), plus `consequences` and `consequence_notes` |
 
-### `relationships.json` - 3,367 records
+### `relationships.json` - 2,155 records
 
 Every record is `type: "relationship"` with id, relationship_type, source_ref
 and target_ref.
 
 | `relationship_type` | Count | Endpoints |
 |---|---|---|
-| `related_to` | 1,483 | `CAPEC-N` -> `CWE-N` or `T####`, from each attack pattern's `cwe`/`ATTACK` references. The only links carrying `source_name` |
+| `related_to` | 271 | `CAPEC-N` -> `T####`, from each attack pattern's `ATTACK` references. The only links carrying `source_name`. The `cwe` references are dropped as CWE's exact mirror |
 | `mitigates` | 1,172 | course-of-action -> attack-pattern (STIX id -> `CAPEC-N`). The only links that keep their upstream STIX id, and the only ones carrying `created`/`modified` |
 | `child_of` | 533 | attack-pattern -> attack-pattern (one direction; `parent_of` is its exact mirror) |
 | `can_precede` | 162 | attack-pattern -> attack-pattern (one direction; `can_follow` is its exact mirror) |

@@ -8,8 +8,10 @@ boilerplate.
 
 Attack patterns are keyed `CAPEC-N` from their `capec` external_reference rather
 than by STIX id (kept alongside as `stix_id`), and every relationship endpoint
-naming one is rewritten to match. Their `cwe`/`ATTACK` external_references become
-outward edges carrying `source_name`; the bibliographic ones are dropped.
+naming one is rewritten to match. Their `ATTACK` external_references become
+outward edges carrying `source_name`; the bibliographic ones are dropped, and so
+are the `cwe` ones -- CWE's own `RelatedAttackPatterns` field is their exact
+mirror, so keeping both stored all 1,212 CWE/CAPEC links twice.
 
 Fields that don't survive verbatim: `x_capec_status`, `x_capec_execution_flow`
 and `x_capec_skills_required` are dropped; `x_capec_alternate_terms` folds into
@@ -70,7 +72,10 @@ FIELDS_BY_TYPE: Dict[str, Tuple[str, ...]] = {
 DROPPED_TYPES = {"identity", "marking-definition"}
 
 # external_references source_name values that become outward-pointing edges.
-EXTERNAL_RELATIONSHIP_SOURCE_NAMES = {"cwe", "ATTACK"}
+# `cwe` is deliberately not one of them: CWE's `RelatedAttackPatterns` produces the
+# same 1,212 links as `CWE-N -> CAPEC-N`, the forward direction of the
+# CVE -> CWE -> CAPEC -> ATT&CK chain, so only that side is kept.
+EXTERNAL_RELATIONSHIP_SOURCE_NAMES = {"ATTACK"}
 EXTERNAL_RELATIONSHIP_TYPE = "related_to"
 EXTERNAL_RELATIONSHIP_KEY = "external-relationship"
 
@@ -236,7 +241,7 @@ def build_external_relationships(obj: Dict[str, Any], capec_id: int) -> List[Dic
         if source_name not in EXTERNAL_RELATIONSHIP_SOURCE_NAMES or not target_ref:
             continue
         if (source_name, target_ref) in seen:
-            continue  # 3 attack patterns list the same external reference twice upstream
+            continue  # one attack pattern lists the same ATT&CK reference twice upstream
         seen.add((source_name, target_ref))
         relationships.append(make_relationship(source_ref, target_ref, EXTERNAL_RELATIONSHIP_TYPE, source_name=source_name))
     return relationships
