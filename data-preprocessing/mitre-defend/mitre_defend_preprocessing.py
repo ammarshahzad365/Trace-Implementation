@@ -546,7 +546,8 @@ def collapse_parallel_relationships(records: List[Dict[str, Any]]) -> List[Dict[
 
     Nothing is dropped. Attributes identical across the group stay scalar; attributes that
     differ become a list holding one entry per original statement, in document order, and
-    a field a statement did not carry holds `null` to keep that alignment -- so entry `i`
+    a field a statement did not carry holds `""` to keep that alignment (Neo4j rejects a
+    list property containing `null`, so an empty string is the placeholder) -- so entry `i`
     of each of those lists belongs to the same original statement, and the original
     statements are recoverable exactly. A merged record names those fields in
     `merged_fields`, without which they could not be told apart from a field that was
@@ -573,7 +574,10 @@ def collapse_parallel_relationships(records: List[Dict[str, Any]]) -> List[Dict[
             if all(value == values[0] for value in values):
                 merged[field] = values[0]
             else:
-                merged[field] = values
+                # `""` not `None`: these lists become Neo4j list properties, and Neo4j
+                # rejects a null inside one. Only CWE hits this, on the 2 `child_of`
+                # links where one view states an `ordinal` and the other does not.
+                merged[field] = ["" if value is None else value for value in values]
                 merged_fields.append(field)
         merged["merged_fields"] = merged_fields
         collapsed.append(merged)

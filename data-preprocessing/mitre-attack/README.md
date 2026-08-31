@@ -266,7 +266,8 @@ caps expansion by node degree read that as a much busier graph than it is.
 `collapse_parallel_relationships()` now merges each group into one record:
 attributes that are the same across the group stay scalar, attributes that differ
 become index-aligned lists (entry `i` of each belongs to the same original
-statement, `null` where a statement did not carry the field), and
+statement, `""` where a statement did not carry the field, since Neo4j rejects a
+list property holding a null), and
 `merged_fields` names those lists so they can be told from a field that was
 already multi-valued on one statement. 57 of the links here are merged records;
 nothing is dropped, and expanding them reproduces the pre-merge file exactly.
