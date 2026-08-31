@@ -32,12 +32,18 @@ different id spaces. Every endpoint uses the stripped `@id` rather than D3FEND's
 short code (`d3f:d3fend-id`, e.g. `D3-AMED`), which exists for `technique`
 records only and is kept there as a `d3fend_id` attribute.
 
-Edges come from the entity domains' own ref fields (`has_subclass`, `child_of`,
-`weakness_of`, `may_be_weakness_of`) and from mining `mappings/latest.json`'s
-14,003 SPARQL-result rows, deduplicated against the full row set, for
-`technique --{relation}--> artifact`, `technique --enables--> tactic`,
+Edges come from the entity domains' own ref fields (`rdfs:hasSubClass`,
+`rdfs:subClassOf`, the two `weakness-of` forms) and from mining
+`mappings/latest.json`'s 14,003 SPARQL-result rows, deduplicated against the full
+row set, for `technique --{relation}--> artifact`, `technique --enables--> tactic`,
 `offensive-technique --{relation}--> artifact`, and the dataset's headline fact,
 `technique --counters--> offensive-technique`.
+
+The artifact relations are bucketed rather than kept one type per name: D3FEND's
+70 relation names produced 67 `relationship_type` values here, 61 of them sharing
+648 edges. See `ARTIFACT_RELATION_BUCKETS` below for why, and README.md for the
+bucket table. The original name survives on every such edge as `verb`, so the
+reduction is lossless.
 
 Every string is normalized on the way out by `clean_record()`: CRLF to LF,
 non-breaking spaces and tabs to plain spaces, horizontal whitespace runs
@@ -73,16 +79,94 @@ D3FEND_URI_PREFIX = "http://d3fend.mitre.org/ontologies/d3fend.owl#"
 # tactic-to-tactic hierarchy to emit.)
 ABSTRACT_WEAKNESS_ROOT = "Weakness"
 
-HAS_SUBCLASS_RELATIONSHIP_TYPE = "has_subclass"
 CHILD_OF_RELATIONSHIP_TYPE = "child_of"  # same relationship_type CWE uses for its analogous edge
 WEAKNESS_OF_RELATIONSHIP_TYPE = "weakness_of"
-MAY_BE_WEAKNESS_OF_RELATIONSHIP_TYPE = "may_be_weakness_of"
 ENABLES_RELATIONSHIP_TYPE = "enables"
 COUNTERS_RELATIONSHIP_TYPE = "counters"
 
+# ---------------------------------------------------------------------------
+# Relation vocabulary
+# ---------------------------------------------------------------------------
+# D3FEND names 70 distinct artifact relations across its two sides, and turning each
+# into its own `relationship_type` produced 67 types here -- 61 of which covered 648
+# edges between them, several with a single edge. That is a schema too large to put in
+# a retrieval prompt and too sparse to query: a relation with one edge cannot support
+# an answer. It also misreads the source. In D3FEND's own ontology these are *properties*
+# (`d3f:analyzes`, `d3f:monitors`), not classes, and the `counters` rows already carry
+# them as attributes -- so promoting them to types was never what the catalog meant.
+#
+# Each relation is therefore mapped to one of eight buckets, and the original verb is
+# kept on the edge as `verb`. Nothing is lost: `verb` recovers the exact original type,
+# while `relationship_type` is now coarse enough to traverse and name in a prompt.
+#
+# Buckets are per-side because the same verb means opposite things depending on who
+# performs it. An attack that deletes a log is destroying evidence; a defence that
+# deletes a file is evicting a threat. The side is known exactly -- these come from
+# different columns of the mappings export -- so it is never inferred.
+DEFENSIVE_SIDE = "defensive"
+OFFENSIVE_SIDE = "offensive"
+
+# D3FEND hedges a relation by prefixing `may-`. That is a confidence, not a different
+# relation, so it becomes `certainty` and the verb keeps its asserted spelling. Listed
+# explicitly rather than stripped, because stripping `may-modify` yields `modify`, which
+# is not the asserted form (`modifies`).
+HEDGED_RELATION_LABELS: Dict[str, str] = {
+    "may-access": "accesses",
+    "may-add": "adds",
+    "may-contain": "contains",
+    "may-create": "creates",
+    "may-execute": "executes",
+    "may-invoke": "invokes",
+    "may-modify": "modifies",
+    "may-produce": "produces",
+    "may-run": "runs",
+    "may-transfer": "transfers",
+}
+
+CERTAINTY_ASSERTED = "asserted"
+CERTAINTY_POSSIBLE = "possible"
+
+ARTIFACT_RELATION_BUCKETS: Dict[str, Dict[str, str]] = {
+    OFFENSIVE_SIDE: {
+        # reaching or reading an artifact without changing it
+        "accesses": "accesses", "reads": "accesses", "enumerates": "accesses",
+        "queries": "accesses", "interprets": "accesses", "uses": "accesses",
+        "connects": "accesses",
+        # bringing an artifact into being, or placing one
+        "produces": "creates", "creates": "creates", "adds": "creates",
+        "copies": "creates", "loads": "creates", "installs": "creates",
+        # changing, damaging or falsifying one that already exists
+        "modifies": "modifies", "transfers": "modifies", "deletes": "modifies",
+        "disables": "modifies", "abuses": "modifies", "obfuscates": "modifies",
+        "encrypts": "modifies", "forges": "modifies", "unmounts": "modifies",
+        "injects": "modifies",
+        # causing one to run
+        "executes": "executes", "invokes": "executes", "runs": "executes",
+    },
+    DEFENSIVE_SIDE: {
+        # looking at an artifact to learn from it
+        "analyzes": "observes", "monitors": "observes", "inventories": "observes",
+        "maps": "observes", "evaluates": "observes", "verifies": "observes",
+        "validates": "observes", "authenticates": "observes", "uses": "observes",
+        "reads": "observes", "accesses": "observes",
+        # stopping or limiting what can be done with it
+        "filters": "constrains", "blocks": "constrains", "isolates": "constrains",
+        "restricts": "constrains", "quarantines": "constrains", "terminates": "constrains",
+        "suspends": "constrains", "use-limits": "constrains", "neutralizes": "constrains",
+        "contains": "constrains", "disables": "constrains",
+        # changing it so it resists attack, deception included
+        "hardens": "hardens", "strengthens": "hardens", "encrypts": "hardens",
+        "configures": "hardens", "updates": "hardens", "regenerates": "hardens",
+        "manages": "hardens", "creates": "hardens", "modifies": "hardens",
+        "spoofs": "hardens", "obfuscates": "hardens",
+        # removing it or putting it back as it was
+        "restores": "restores", "erases": "restores", "deletes": "restores",
+    },
+}
+
 WEAKNESS_REF_FIELDS: Tuple[Tuple[str, str], ...] = (
-    ("d3f:weakness-of", WEAKNESS_OF_RELATIONSHIP_TYPE),
-    ("d3f:may-be-weakness-of", MAY_BE_WEAKNESS_OF_RELATIONSHIP_TYPE),
+    ("d3f:weakness-of", CERTAINTY_ASSERTED),
+    ("d3f:may-be-weakness-of", CERTAINTY_POSSIBLE),
 )
 
 DEFINITION_SEPARATOR = "\n\n"
@@ -236,12 +320,18 @@ def build_artifact_record(raw: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_artifact_relationships(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     """`rdfs:hasSubClass` -> artifact -> child artifact. Resolves 100% within this
-    dataset's own artifacts."""
-    source_ref = strip_prefix(raw["@id"])
+    dataset's own artifacts.
+
+    Emitted reversed, as `child_of`, so both hierarchies in this file point the same way
+    -- specific to general -- and match the name CWE and CAPEC already use. D3FEND is the
+    only source that states its taxonomy downwards; keeping that direction meant a reader
+    had to know which catalog an edge came from before it could tell parent from child.
+    """
+    parent_ref = strip_prefix(raw["@id"])
     return [
-        make_relationship(source_ref, target_ref, HAS_SUBCLASS_RELATIONSHIP_TYPE)
-        for target_ref in (ref_id(child) for child in as_list(raw.get("rdfs:hasSubClass")))
-        if target_ref
+        make_relationship(child_ref, parent_ref, CHILD_OF_RELATIONSHIP_TYPE)
+        for child_ref in (ref_id(child) for child in as_list(raw.get("rdfs:hasSubClass")))
+        if child_ref
     ]
 
 
@@ -254,11 +344,16 @@ def build_weakness_relationships(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
         target_ref = ref_id(parent)
         if target_ref and target_ref != ABSTRACT_WEAKNESS_ROOT:
             relationships.append(make_relationship(source_ref, target_ref, CHILD_OF_RELATIONSHIP_TYPE))
-    for source_field, relationship_type in WEAKNESS_REF_FIELDS:
+    for source_field, certainty in WEAKNESS_REF_FIELDS:
         for target in as_list(raw.get(source_field)):
             target_ref = ref_id(target)
             if target_ref:
-                relationships.append(make_relationship(source_ref, target_ref, relationship_type))
+                # `may-be-weakness-of` is the same relation hedged, so it folds into
+                # `weakness_of` with the hedge carried as `certainty`, exactly as the
+                # artifact relations do.
+                relationships.append(
+                    make_relationship(source_ref, target_ref, WEAKNESS_OF_RELATIONSHIP_TYPE, certainty=certainty)
+                )
     return relationships
 
 
@@ -274,8 +369,25 @@ def mapping_ref(row: Dict[str, Any], key: str) -> Optional[str]:
     return value
 
 
-def relationship_type_from_label(label: str) -> str:
+def snake_case_label(label: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", label.strip().lower()).strip("_")
+
+
+def resolve_artifact_relation(label: str, side: str) -> Tuple[str, str, str]:
+    """Map one raw relation label to (relationship_type, verb, certainty).
+
+    Raises rather than guessing: a D3FEND release that adds a relation must fail the
+    run loudly here, not arrive silently in the output as an unmapped 68th type.
+    """
+    normalized = label.strip().lower()
+    certainty = CERTAINTY_ASSERTED
+    if normalized in HEDGED_RELATION_LABELS:
+        normalized = HEDGED_RELATION_LABELS[normalized]
+        certainty = CERTAINTY_POSSIBLE
+    bucket = ARTIFACT_RELATION_BUCKETS[side].get(normalized)
+    if bucket is None:
+        raise ParseError(f"unmapped D3FEND {side} relation {label!r} -- add it to ARTIFACT_RELATION_BUCKETS")
+    return bucket, snake_case_label(normalized), certainty
 
 
 def build_mapping_relationships(mapping_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -311,21 +423,33 @@ def build_mapping_relationships(mapping_rows: Sequence[Dict[str, Any]]) -> List[
 
     relationships: List[Dict[str, Any]] = []
     for source_ref, rel_label, target_ref in sorted(technique_artifact):
-        relationships.append(make_relationship(source_ref, target_ref, relationship_type_from_label(rel_label)))
+        bucket, verb, certainty = resolve_artifact_relation(rel_label, DEFENSIVE_SIDE)
+        relationships.append(make_relationship(source_ref, target_ref, bucket, verb=verb, certainty=certainty))
     for source_ref, target_ref in sorted(technique_tactic):
         relationships.append(make_relationship(source_ref, target_ref, ENABLES_RELATIONSHIP_TYPE))
     for source_ref, rel_label, target_ref in sorted(offensive_technique_artifact):
-        relationships.append(make_relationship(source_ref, target_ref, relationship_type_from_label(rel_label)))
+        bucket, verb, certainty = resolve_artifact_relation(rel_label, OFFENSIVE_SIDE)
+        relationships.append(make_relationship(source_ref, target_ref, bucket, verb=verb, certainty=certainty))
     for def_tech, off_tech, def_artifact, def_artifact_rel, off_artifact, off_artifact_rel in sorted(counters):
+        # The bridge attributes name the same relations, so they get the same treatment:
+        # one spelling, the hedge as a certainty. Raw D3FEND writes these with a hyphen
+        # (`may-modify`) and the standalone edges with an underscore (`may_modify`), so
+        # without this the identical fact was spelled two ways in one file.
+        def_bucket, def_verb, def_certainty = resolve_artifact_relation(def_artifact_rel, DEFENSIVE_SIDE)
+        off_bucket, off_verb, off_certainty = resolve_artifact_relation(off_artifact_rel, OFFENSIVE_SIDE)
         relationships.append(
             make_relationship(
                 def_tech,
                 off_tech,
                 COUNTERS_RELATIONSHIP_TYPE,
                 def_artifact=def_artifact,
-                def_artifact_rel=def_artifact_rel,
+                def_artifact_rel=def_bucket,
+                def_artifact_verb=def_verb,
+                def_artifact_certainty=def_certainty,
                 off_artifact=off_artifact,
-                off_artifact_rel=off_artifact_rel,
+                off_artifact_rel=off_bucket,
+                off_artifact_verb=off_verb,
+                off_artifact_certainty=off_certainty,
             )
         )
     return relationships

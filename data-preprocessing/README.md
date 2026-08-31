@@ -93,9 +93,12 @@ exact raw field each one came from and what happened to it on the way. Read it
 when the question is *"where did this field come from?"* rather than *"how does
 this source work?"*. Two formats, same subject:
 
-- [`DATA_PROVENANCE_REPORT.docx`](DATA_PROVENANCE_REPORT.docx) - one numbered
-  section per type (28 entity types, 39 relationship groups), each showing a real
-  raw record, the same thing after preprocessing, and a field-by-field table of
-  what changed. Editable in Word.
-- [`DATA_PROVENANCE_REPORT.md`](DATA_PROVENANCE_REPORT.md) - the same ground
-  organised by source rather than by type, for reading in git.
+- [`DATA_PROVENANCE_REPORT.docx`](../../reports/DATA_PROVENANCE_REPORT.docx) -
+  one numbered section per type (25 entity types, 42 relationship types, 67
+  sections), each showing a real raw record, the same thing after preprocessing,
+  and a field-by-field table of what changed. Editable in Word. It lives in
+  `Trace Paper/reports/`, outside this repository, because generated `.json` is
+  gitignored here and the report is a hand-editable deliverable rather than
+  build output.
+- `DATA_PROVENANCE_REPORT.md` - **not written yet.** The same ground organised by
+  source rather than by type, for reading in git.

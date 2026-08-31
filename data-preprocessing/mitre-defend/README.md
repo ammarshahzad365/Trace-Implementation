@@ -90,9 +90,8 @@ found nothing in either worth keeping separately:
   reason.
 
 So `counters` links use bare `T####[.###]` ids matched against
-`mitre-attack/entities.json`, and `child_of` / `weakness_of` /
-`may_be_weakness_of` links use bare `CWE-N` ids matched against
-`CWE/entities.json`.
+`mitre-attack/entities.json`, and the weakness-side `child_of` and `weakness_of`
+links use bare `CWE-N` ids matched against `CWE/entities.json`.
 
 D3FEND does provide a separate human-facing short code (`d3f:d3fend-id`, e.g.
 `D3-AMED`), but only for `technique` records. So every link uses the stripped
@@ -101,15 +100,18 @@ is kept as an extra property on `technique` records.
 
 ## What becomes a link
 
-- `artifact.rdfs:hasSubClass` -> `has_subclass` (artifact -> child artifact).
-  Verified to resolve 100% inside this dataset's own artifacts.
+- `artifact.rdfs:hasSubClass` -> `child_of`, **reversed** to child -> parent.
+  Verified to resolve 100% inside this dataset's own artifacts. D3FEND is the
+  only source here that states its taxonomy downwards; emitting it as written
+  meant a reader had to know which catalog a link came from before it could tell
+  parent from child, so it is flipped to match CWE and CAPEC.
 - `weakness.rdfs:subClassOf` -> `child_of` (weakness -> parent weakness), the
   same `relationship_type` CWE uses for the equivalent link. 10 of 1,113 parent
   references point at the abstract root class `d3f:Weakness` rather than another
   weakness, and are dropped rather than becoming links to a non-entity.
-- `weakness.d3f:weakness-of` / `d3f:may-be-weakness-of` -> `weakness_of` /
-  `may_be_weakness_of` (weakness -> artifact). Both resolve 100% into this
-  dataset's artifacts.
+- `weakness.d3f:weakness-of` / `d3f:may-be-weakness-of` -> both become
+  `weakness_of` (weakness -> artifact), separated by `certainty`. Both resolve
+  100% into this dataset's artifacts.
 - `tactic.rdfs:subClassOf` is **dropped entirely, with no link written** - all 7
   tactics point at the same abstract root `d3f:DefensiveTactic`, not at another
   tactic. There is no real tactic-to-tactic hierarchy in this data.
@@ -118,22 +120,68 @@ is kept as an extra property on `technique` records.
 defence/attack trace) is mined for four kinds of link, each deduplicated against
 the whole row set rather than kept as 14,003 raw rows:
 
-- `technique --{relation}--> artifact` (166 unique; the relation is the literal
-  D3FEND relation name - `analyzes`, `filters`, `isolates`). Available nowhere
-  else here, since technique records carry no artifact relation of their own.
+- `technique --{bucket}--> artifact` (166 unique). Available nowhere else here,
+  since technique records carry no artifact relation of their own.
 - `technique --enables--> tactic` (149, one per technique - verified stable:
   every technique maps to exactly one tactic across every row it appears in).
-- `offensive-technique --{relation}--> artifact` (482 unique - `modifies`,
-  `may_modify`, `creates`). Likewise D3FEND-only information layered onto
-  ATT&CK's techniques; there is no local entity for the endpoint, as above.
+- `offensive-technique --{bucket}--> artifact` (482 unique). Likewise D3FEND-only
+  information layered onto ATT&CK's techniques; there is no local entity for the
+  endpoint, as above.
 - `technique --counters--> offensive-technique` (3,544 unique) - **the dataset's
-  headline fact.** It keeps `def_artifact`, `def_artifact_rel`, `off_artifact`
-  and `off_artifact_rel` as link attributes, because those explain *why* the
-  technique counters that specific offensive technique: the same artifact acted
-  on by both sides is the bridge. (D3FEND's *Access Modeling* counters `T1078`
-  "Valid Accounts" because both act on a `UserAccount` artifact - one `maps` it,
-  the other `uses` it.) One pair can legitimately have more than one link when
-  more than one bridge justifies it: 3,544 links over 3,234 pairs.
+  headline fact.** It keeps the artifact bridge as link attributes, because those
+  explain *why* the technique counters that specific offensive technique: the same
+  artifact acted on by both sides is the bridge. (D3FEND's *Access Modeling*
+  counters `T1078` "Valid Accounts" because both act on a `UserAccount` artifact -
+  one `maps` it, the other `uses` it.) One pair can legitimately have more than
+  one link when more than one bridge justifies it: 3,544 links over 3,234 pairs.
+
+### Why the artifact relations are bucketed rather than kept as types
+
+D3FEND names 70 distinct artifact relations across its two sides. Emitted one
+per name, this file carried **67 `relationship_type` values, 61 of which shared
+just 648 links** - `unmounts`, `injects`, `queries` and a dozen others with a
+single link each. That is a schema too large to put in a retrieval prompt and too
+sparse to query: a relation with one link cannot support an answer or an
+algorithm.
+
+It also misread the source. In D3FEND's own ontology these are **properties**
+(`d3f:analyzes`, `d3f:monitors`), not classes, and the `counters` rows already
+carry them as attributes - so promoting them to types was never what the catalog
+meant.
+
+Each relation now maps to one of **eight buckets**, with the original name kept
+on the link as `verb`. `relationship_type` is coarse enough to traverse and to
+name in a prompt; `verb` recovers the exact original. Verified lossless: every
+one of the 6,471 links from the previous output reconstructs exactly, and no link
+appears that was not there before.
+
+Buckets are **per side**, because the same verb means opposite things depending
+on who performs it - an attack that `deletes` a log is destroying evidence, a
+defence that `deletes` a file is evicting a threat. The side is never inferred:
+defensive and offensive relations arrive in different columns of the mappings
+export.
+
+| Side | Bucket | Means |
+|---|---|---|
+| offensive | `accesses` | reaches or reads an artifact without changing it |
+| offensive | `creates` | brings one into being, or places one |
+| offensive | `modifies` | changes, damages or falsifies an existing one |
+| offensive | `executes` | causes one to run |
+| defensive | `observes` | looks at one to learn from it |
+| defensive | `constrains` | stops or limits what can be done with it |
+| defensive | `hardens` | changes it so it resists attack, deception included |
+| defensive | `restores` | removes one or puts it back as it was |
+
+D3FEND hedges a relation by prefixing `may-`. That is a confidence, not a
+different relation, so it becomes `certainty: "possible"` on the link and the
+verb keeps its asserted spelling - collapsing eleven further types. This also
+fixes a spelling split: raw D3FEND writes the hedge with a hyphen inside the
+`counters` attributes (`may-modify`) but the standalone links arrived with an
+underscore (`may_modify`), so one fact was spelled two ways in one file.
+
+An unrecognised relation raises `ParseError` rather than passing through. A
+D3FEND release that adds a verb fails the run loudly here, instead of arriving
+silently in the output as an unmapped 68th type.
 
 Two things in a mapping row are deliberately **not** turned into links:
 
@@ -174,12 +222,21 @@ Every record is `type: "relationship"` with id, relationship_type, source_ref
 and target_ref. Two endpoint kinds below - `offensive-technique` and `weakness` -
 have no entity record here; they join by bare id against another source.
 
+12 `relationship_type` values, down from 67. Links carrying a bucket also carry
+`verb` (the original D3FEND relation name) and `certainty` (`asserted` or
+`possible`).
+
 | `relationship_type` | Count | Endpoints |
 |---|---|---|
-| `counters` | 3,544 | technique -> ATT&CK technique id, joining `mitre-attack/entities.json`. Carries the four artifact-bridge attributes |
-| `child_of` | 1,103 | weakness -> weakness, `CWE-N` ids, joining `CWE/entities.json` |
-| `has_subclass` | 995 | artifact -> artifact |
+| `counters` | 3,544 | technique -> ATT&CK technique id, joining `mitre-attack/entities.json`. Carries the artifact-bridge attributes |
+| `child_of` | 2,098 | weakness -> weakness (1,103), `CWE-N` ids joining `CWE/entities.json`; artifact -> artifact (995, reversed from `hasSubClass`) |
 | `enables` | 149 | technique -> tactic |
-| 63 D3FEND relation names | 648 | technique or ATT&CK technique -> artifact - `modifies` (107), `produces` (67), `may_modify` (56), `analyzes` (49), `accesses` (49), down to several with a single link |
-| `weakness_of` | 26 | weakness -> artifact |
-| `may_be_weakness_of` | 6 | weakness -> artifact |
+| `modifies` | 182 | ATT&CK technique -> artifact |
+| `creates` | 154 | ATT&CK technique -> artifact |
+| `accesses` | 87 | ATT&CK technique -> artifact |
+| `observes` | 81 | technique -> artifact |
+| `executes` | 59 | ATT&CK technique -> artifact |
+| `constrains` | 41 | technique -> artifact |
+| `weakness_of` | 32 | weakness -> artifact (26 `asserted`, 6 `possible`) |
+| `hardens` | 28 | technique -> artifact |
+| `restores` | 16 | technique -> artifact |
