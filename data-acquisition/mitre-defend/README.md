@@ -3,7 +3,8 @@
 Downloads D3FEND (Detection, Denial, and Disruption Framework Empowering Network
 Defense) from MITRE's own "alpha" REST JSON API at
 [d3fend.mitre.org](https://d3fend.mitre.org/api-docs/). There is one endpoint
-per entity type, plus one bulk mapping export:
+per entity type, plus one bulk mapping export and the published OWL ontology
+(which is not part of that API, but is the only place the definitions live):
 
 | Domain | Endpoint | Contents |
 |---|---|---|
@@ -13,6 +14,7 @@ per entity type, plus one bulk mapping export:
 | `weakness` | `/api/weakness/all.json` | CWE weaknesses as D3FEND maps them |
 | `offensive-technique` | `/api/offensive-technique/all.json` | ATT&CK techniques that D3FEND refers to |
 | `mapping` | `/api/ontology/inference/d3fend-full-mappings.json` | The full worked-out defence <-> artifact <-> ATT&CK mapping |
+| `ontology` | `/ontologies/d3fend.json` | The published OWL ontology - the definitions, see below |
 
 ## Three things that make this crawler different
 
@@ -30,6 +32,17 @@ own fields onto every record: `_first_seen_at` (when it first saw the record,
 carried forward between runs) and `_content_hash` (a SHA-256 of the record's own
 fields). A record counts as "changed" when its `_content_hash` changes, not
 because D3FEND said so.
+
+**The `/api/*` endpoints carry no prose, so the ontology is fetched too.** The
+five entity endpoints return identity fields only - `@id`, `rdfs:label`,
+`d3f:d3fend-id`, `d3f:synonym` - and a `d3f:definition` on just 15 of the 1,193
+records across all of them. `/ontologies/d3fend.json` (4.9 MB of JSON-LD, keyed
+by the same `@id`s) has definitions for 271/271 techniques, 7/7 tactics and
+867/915 artifacts, plus the long-form `d3f:kb-article` on 193. Without it every
+D3FEND node reaches the graph with nothing to embed or keyword-search. It is one
+document for the whole ontology, so ~6,500 of its 7,672 nodes are ATT&CK classes
+and OWL boilerplate this project takes nothing from; they are stored as fetched
+and filtered in preprocessing, the same as `weakness`/`offensive-technique`.
 
 **`mapping` is the odd one out.** The five entity endpoints return JSON-LD
 (`{"@graph": [...]}`, each entry keyed by `@id`). `mapping` is documented as
@@ -64,6 +77,7 @@ data-acquisition/mitre-defend/
 ├── weaknesses/{latest.json, delta.json}
 ├── offensive-techniques/{latest.json, delta.json}
 ├── mappings/{latest.json, delta.json}
+├── ontology/{latest.json, delta.json}
 └── manifest.json            # ontology version/hash/date + per-domain fetch time and counts
 ```
 
@@ -123,7 +137,7 @@ other five domains' `@id` / `d3f:attack-id` fields.
 
 - `--dry-run` - fetch and compare, write nothing.
 - `--domains` - any of `technique tactic artifact weakness offensive-technique
-  mapping` (default: all).
+  mapping ontology` (default: all).
 - `--api-root` - use a different D3FEND API root (default:
   `https://d3fend.mitre.org`).
 - `--timeout`, `--user-agent`, `--base-dir` - see `--help` on either script.

@@ -1,8 +1,8 @@
 """MITRE D3FEND field-projection preprocessor. Full rationale in README.md.
 
-Reads five raw JSON files from the D3FEND crawler
+Reads six raw JSON files from the D3FEND crawler
 (`data-acquisition/mitre-defend/{techniques,tactics,artifacts,weaknesses,
-mappings}/latest.json`) and writes two files: `entities.json` (the
+mappings,ontology}/latest.json`) and writes two files: `entities.json` (the
 `technique`/`tactic`/`artifact` records, distinguished by their own `type`) and
 `relationships.json` (every edge). `weaknesses/latest.json` is read for its
 embedded edges only, and `offensive-techniques/latest.json` isn't read at all:
@@ -32,8 +32,9 @@ different id spaces. Every endpoint uses the stripped `@id` rather than D3FEND's
 short code (`d3f:d3fend-id`, e.g. `D3-AMED`), which exists for `technique`
 records only and is kept there as a `d3fend_id` attribute.
 
-Edges come from the entity domains' own ref fields (`rdfs:hasSubClass`,
-`rdfs:subClassOf`, the two `weakness-of` forms) and from mining
+Edges come from the entity domains' own ref fields (`rdfs:hasSubClass` and the two
+`weakness-of` forms -- weaknesses' `rdfs:subClassOf` is dropped as a duplicate of
+CWE's own hierarchy, see `build_weakness_relationships`) and from mining
 `mappings/latest.json`'s 14,003 SPARQL-result rows, deduplicated against the full
 row set, for `technique --{relation}--> artifact`, `technique --enables--> tactic`,
 `offensive-technique --{relation}--> artifact`, and the dataset's headline fact,
@@ -68,17 +69,14 @@ DOMAIN_FILES: Dict[str, str] = {
     "artifact": "artifacts/latest.json",
     "weakness": "weaknesses/latest.json",
     "mapping": "mappings/latest.json",
+    "ontology": "ontology/latest.json",
 }
 
 D3F_PREFIX = "d3f:"
 D3FEND_URI_PREFIX = "http://d3fend.mitre.org/ontologies/d3fend.owl#"
 
-# 10 of 1,113 weakness parent refs point at this abstract root class rather than another
-# weakness, so they'd be edges to a non-entity. (The 7 tactics' `rdfs:subClassOf` is
-# dropped for the same reason: all 7 point at `d3f:DefensiveTactic`, so there is no real
-# tactic-to-tactic hierarchy to emit.)
-ABSTRACT_WEAKNESS_ROOT = "Weakness"
-
+# The 7 tactics' `rdfs:subClassOf` is dropped: all 7 point at the abstract root class
+# `d3f:DefensiveTactic`, so there is no real tactic-to-tactic hierarchy to emit.
 CHILD_OF_RELATIONSHIP_TYPE = "child_of"  # same relationship_type CWE uses for its analogous edge
 WEAKNESS_OF_RELATIONSHIP_TYPE = "weakness_of"
 ENABLES_RELATIONSHIP_TYPE = "enables"
@@ -263,8 +261,10 @@ def literal_value(value: Any) -> Any:
 
 
 def make_relationship(source_ref: str, target_ref: str, relationship_type: str, **extra: Any) -> Dict[str, Any]:
+    # Seeded on the triple alone: `collapse_parallel_relationships()` leaves exactly one
+    # record per (source, type, target), so there is nothing left for `extra` to
+    # disambiguate, and an id that ignores attributes stays put when they change.
     seed_parts = [source_ref, relationship_type, target_ref]
-    seed_parts.extend(f"{key}={extra[key]}" for key in sorted(extra))
     relationship_uuid = uuid.uuid5(uuid.NAMESPACE_URL, "mitre-defend-preprocessing:" + "|".join(seed_parts))
     record: Dict[str, Any] = {
         "id": f"relationship--{relationship_uuid}",
@@ -286,6 +286,43 @@ def apply_aliases(record: Dict[str, Any], *sources: Any) -> None:
         merged.extend(value for value in as_list(source) if value)
     if merged:
         record["aliases"] = list(dict.fromkeys(merged))
+
+
+def index_ontology(records: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """`ontology/latest.json` keyed by the same stripped `@id` the entity records use.
+
+    It covers the whole published ontology (7,672 nodes), most of which is ATT&CK classes
+    and OWL boilerplate this project takes nothing from; only ids that match an entity
+    built here are ever read out of it.
+    """
+    return {stripped: raw for raw in records if (stripped := strip_prefix(raw.get("@id")))}
+
+
+def apply_ontology_text(record: Dict[str, Any], ontology: Dict[str, Dict[str, Any]]) -> None:
+    """Fill `description`/`kb_article` from the ontology.
+
+    The `/api/*` endpoints the other domains come from return identity fields only, so
+    without this 1,178 of 1,193 records reach the graph with no prose at all -- unusable
+    as embedding or keyword-search targets, which silently removes the whole defensive
+    catalog from retrieval. The ontology carries `d3f:definition` for 271/271 techniques,
+    7/7 tactics and 867/915 artifacts, and the long-form `d3f:kb-article` for 193.
+
+    An endpoint definition wins where one exists, so this only ever fills a gap: the two
+    sources never disagree (0 endpoint-only values, and the 7 tactic definitions are
+    byte-identical in both), except on the 8 multi-definition industrial-protocol
+    artifacts, where the endpoint's several definitions are the fuller answer and the
+    ontology's single one would lose the rest.
+    """
+    raw = ontology.get(record["id"])
+    if not raw:
+        return
+    if not record.get("description"):
+        definitions = as_list(raw.get("d3f:definition"))
+        if definitions:
+            record["description"] = DEFINITION_SEPARATOR.join(definitions)
+    kb_article = as_list(raw.get("d3f:kb-article"))
+    if kb_article:
+        record["kb_article"] = DEFINITION_SEPARATOR.join(kb_article)
 
 
 def build_technique_record(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -336,14 +373,20 @@ def build_artifact_relationships(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def build_weakness_relationships(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """`rdfs:subClassOf` -> weakness -> parent weakness, plus the two `weakness-of`
-    fields pointing at artifacts (both resolve 100% into this dataset's artifacts)."""
+    """The two `weakness-of` fields pointing at artifacts (both resolve 100% into this
+    dataset's artifacts).
+
+    `rdfs:subClassOf` is deliberately not read. It restates the CWE hierarchy, which the
+    CWE module already loads from CWE's own `RelatedWeaknesses`: of the 1,103 `CWE-N ->
+    CWE-N` links it produced, 1,079 were byte-identical to CWE's and the remaining 24
+    contradicted rather than extended it -- D3FEND has CWE-1051 under CWE-665 where CWE
+    itself has CWE-1419, and CWE-1265 under CWE-691 where CWE has CWE-662, the shape of a
+    stale copy of an older CWE tree. Keeping it stored every CWE parent link twice and
+    gave the graph two disagreeing answers for 24 of them. The artifact hierarchy
+    (`build_artifact_relationships`) is D3FEND's own and stays.
+    """
     source_ref = strip_prefix(raw["@id"])
     relationships = []
-    for parent in as_list(raw.get("rdfs:subClassOf")):
-        target_ref = ref_id(parent)
-        if target_ref and target_ref != ABSTRACT_WEAKNESS_ROOT:
-            relationships.append(make_relationship(source_ref, target_ref, CHILD_OF_RELATIONSHIP_TYPE))
     for source_field, certainty in WEAKNESS_REF_FIELDS:
         for target in as_list(raw.get(source_field)):
             target_ref = ref_id(target)
@@ -458,6 +501,8 @@ def build_mapping_relationships(mapping_rows: Sequence[Dict[str, Any]]) -> List[
 def parse(domains: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
     result: Dict[str, List[Dict[str, Any]]] = {"technique": [], "tactic": [], "artifact": [], "relationship": []}
 
+    ontology = index_ontology(domains["ontology"])
+
     for raw in domains["technique"]:
         result["technique"].append(build_technique_record(raw))
     for raw in domains["tactic"]:
@@ -465,6 +510,9 @@ def parse(domains: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, 
     for raw in domains["artifact"]:
         result["artifact"].append(build_artifact_record(raw))
         result["relationship"].extend(build_artifact_relationships(raw))
+    for kind in ("technique", "tactic", "artifact"):
+        for record in result[kind]:
+            apply_ontology_text(record, ontology)
     for raw in domains["weakness"]:
         result["relationship"].extend(build_weakness_relationships(raw))
 
@@ -476,9 +524,60 @@ def parse(domains: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, 
         f"{len(domains['tactic'])} tactics, "
         f"{len(domains['artifact'])} artifacts, "
         f"{len(domains['weakness'])} weaknesses (relationships only, no entity records), "
-        f"{len(domains['mapping'])} mapping rows"
+        f"{len(domains['mapping'])} mapping rows, "
+        f"{len(domains['ontology'])} ontology nodes"
+    )
+    entities = [r for kind in ("technique", "tactic", "artifact") for r in result[kind]]
+    described = sum(1 for r in entities if r.get("description"))
+    print(
+        f"[mitre-defend-parser] text from the ontology: {described}/{len(entities)} entities "
+        f"have a description, {sum(1 for r in entities if r.get('kb_article'))} a kb_article"
     )
     return result
+
+
+def collapse_parallel_relationships(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One record per (`source_ref`, `relationship_type`, `target_ref`).
+
+    The source states some links more than once, each statement carrying different
+    attributes -- one defensive technique countering the same ATT&CK technique through four different digital-artifact pairs. Written straight through, those became parallel
+    edges between the same two nodes, so `degree()` counted a node's statements rather
+    than its neighbours, and retrieval that caps expansion by degree read the graph wrong.
+
+    Nothing is dropped. Attributes identical across the group stay scalar; attributes that
+    differ become a list holding one entry per original statement, in document order, and
+    a field a statement did not carry holds `null` to keep that alignment -- so entry `i`
+    of each of those lists belongs to the same original statement, and the original
+    statements are recoverable exactly. A merged record names those fields in
+    `merged_fields`, without which they could not be told apart from a field that was
+    already multi-valued on a single statement -- CWE has `has_mitigation` links whose
+    native two-entry `phase` sits on a record merged from two statements, where length
+    alone cannot say which list is which. This runs after `clean_record()`, whose list
+    handling dedupes and drops empty values, and would otherwise break the alignment
+    those lists depend on.
+    """
+    grouped: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+    for record in records:
+        key = (record["source_ref"], record["relationship_type"], record["target_ref"])
+        grouped.setdefault(key, []).append(record)
+
+    collapsed: List[Dict[str, Any]] = []
+    for group in grouped.values():
+        if len(group) == 1:
+            collapsed.append(group[0])
+            continue
+        merged = dict(group[0])
+        merged_fields = []
+        for field in dict.fromkeys(field for record in group for field in record if field != "id"):
+            values = [record.get(field) for record in group]
+            if all(value == values[0] for value in values):
+                merged[field] = values[0]
+            else:
+                merged[field] = values
+                merged_fields.append(field)
+        merged["merged_fields"] = merged_fields
+        collapsed.append(merged)
+    return collapsed
 
 
 def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> Dict[str, int]:
@@ -486,14 +585,19 @@ def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> 
     concatenated in `result`'s own insertion order so reruns are byte-stable."""
     output_dir.mkdir(parents=True, exist_ok=True)
     files: Dict[str, List[Dict[str, Any]]] = {ENTITIES_FILENAME: [], RELATIONSHIPS_FILENAME: []}
+    counts: Dict[str, int] = {}
     for key, records in result.items():
         target = RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME
-        files[target].extend(clean_record(record) for record in records)
+        cleaned = [clean_record(record) for record in records]
+        if target == RELATIONSHIPS_FILENAME:
+            cleaned = collapse_parallel_relationships(cleaned)
+        files[target].extend(cleaned)
+        counts[key] = len(cleaned)
     for filename, records in files.items():
         with (output_dir / filename).open("w", encoding="utf-8") as handle:
             json.dump(records, handle, indent=2)
             handle.write("\n")
-    return {key: len(records) for key, records in result.items()}
+    return counts
 
 
 def format_counts(counts: Dict[str, int], keys: Sequence[str]) -> str:

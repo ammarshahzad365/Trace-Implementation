@@ -4,7 +4,8 @@ D3FEND has no STIX/TAXII interface like ATT&CK and no single versioned bundle
 like CWE/CAPEC. Instead it exposes a small "alpha" REST JSON API
 (d3fend.mitre.org/api/*) with one endpoint per entity type (techniques, tactics,
 digital artifacts, weaknesses, referenced ATT&CK offensive techniques) plus a
-bulk inferred-relationship export. There is no date-filtered "fetch what changed"
+bulk inferred-relationship export, and -- outside that API -- the published OWL
+ontology at /ontologies/d3fend.json, which is where the definitions live. There is no date-filtered "fetch what changed"
 endpoint, so -- exactly like CWE/CAPEC -- both crawlers here download the same
 full data every run; what differs is what they do with it locally (full
 overwrite vs. merge-and-diff).
@@ -71,6 +72,20 @@ DOMAIN_SPECS = {
         "folder": "mappings",
         "path": "/api/ontology/inference/d3fend-full-mappings.json",
         "graph": False,
+    },
+    # The published OWL ontology, not part of the /api/* surface. The per-domain
+    # endpoints above return only identity fields -- `@id`, `rdfs:label`,
+    # `d3f:d3fend-id`, `d3f:synonym` -- and no prose: 15 of the 1,193 records they
+    # yield carry a `d3f:definition`. This file carries the definitions for the same
+    # `@id`s (271/271 techniques, 7/7 tactics, 867/915 artifacts), plus the long-form
+    # `d3f:kb-article` on 193, and is the only source for either. It is one 4.9 MB
+    # JSON-LD document covering the whole ontology, so it also holds ~6,500 nodes this
+    # project takes nothing from (ATT&CK classes, OWL boilerplate); they are stored as
+    # fetched and filtered in preprocessing, the same as `weakness`/`offensive-technique`.
+    "ontology": {
+        "folder": "ontology",
+        "path": "/ontologies/d3fend.json",
+        "graph": True,
     },
 }
 

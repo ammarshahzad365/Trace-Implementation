@@ -1,12 +1,13 @@
 # MITRE D3FEND Preprocessing
 
-Reads five of the six raw files from the D3FEND crawler
-(`data-acquisition/mitre-defend/{techniques,tactics,artifacts,weaknesses,mappings}/latest.json`)
+Reads six of the seven raw files from the D3FEND crawler
+(`data-acquisition/mitre-defend/{techniques,tactics,artifacts,weaknesses,mappings,ontology}/latest.json`)
 and writes two: `entities.json` (the `technique`, `tactic` and `artifact`
 records, told apart by their own `type`) and `relationships.json`.
 
-`offensive-techniques/latest.json` is not read at all, and
-`weaknesses/latest.json` is read only for the links embedded in it - see below.
+`offensive-techniques/latest.json` is not read at all,
+`weaknesses/latest.json` is read only for the links embedded in it, and
+`ontology/latest.json` only for the prose the `/api/*` endpoints omit - see below.
 
 ## Usage
 
@@ -40,6 +41,9 @@ D3FEND's own vocabulary:
 - The 8 artifacts with several different `d3f:definition` values (one per
   industrial protocol) get them joined into one string, so `description` is a
   string everywhere rather than a string on most records and a list on 8.
+- `d3f:kb-article` -> `kb_article`, kept as its own field rather than appended to
+  `description`. It is long-form prose on 193 techniques, several times the length
+  of a definition, so a retriever wants to embed and rank the two separately.
 
 JSON-LD also collapses a one-item list into a bare value - the same quirk CWE's
 XML-to-JSON conversion has, normalized the same way by `as_list()`. `tactic`
@@ -105,10 +109,15 @@ is kept as an extra property on `technique` records.
   only source here that states its taxonomy downwards; emitting it as written
   meant a reader had to know which catalog a link came from before it could tell
   parent from child, so it is flipped to match CWE and CAPEC.
-- `weakness.rdfs:subClassOf` -> `child_of` (weakness -> parent weakness), the
-  same `relationship_type` CWE uses for the equivalent link. 10 of 1,113 parent
-  references point at the abstract root class `d3f:Weakness` rather than another
-  weakness, and are dropped rather than becoming links to a non-entity.
+- `weakness.rdfs:subClassOf` is **dropped entirely, with no link written**. It
+  restates the CWE hierarchy that `CWE/relationships.json` already carries from
+  CWE's own `RelatedWeaknesses`: of the 1,103 `CWE-N -> CWE-N` links it used to
+  produce, 1,079 were byte-identical to CWE's own and the 24 that were not
+  contradicted rather than extended them - D3FEND files CWE-1051 under CWE-665
+  where CWE itself has CWE-1419, and CWE-1265 under CWE-691 where CWE has
+  CWE-662, the shape of a stale copy of an older CWE tree. Keeping it stored
+  every CWE parent link twice and gave the graph two disagreeing answers for 24
+  of them. The artifact hierarchy below is D3FEND's own and stays.
 - `weakness.d3f:weakness-of` / `d3f:may-be-weakness-of` -> both become
   `weakness_of` (weakness -> artifact), separated by `certainty`. Both resolve
   100% into this dataset's artifacts.
@@ -212,11 +221,16 @@ Two JSON files, each a plain list of records.
 
 | `type` | Count | Contents |
 |---|---|---|
-| `artifact` | 915 | Digital artifacts from the D3FEND Artifact Ontology - id, name, description, aliases |
-| `technique` | 271 | D3FEND defensive techniques - id, name, `d3fend_id` (e.g. `D3-AMED`), aliases |
+| `artifact` | 915 | Digital artifacts from the D3FEND Artifact Ontology - id, name, description (867 of 915), aliases |
+| `technique` | 271 | D3FEND defensive techniques - id, name, `d3fend_id` (e.g. `D3-AMED`), description, `kb_article` (191 of 271), aliases |
 | `tactic` | 7 | D3FEND tactics (Harden, Detect, Isolate, Deceive, Evict, Restore, Model) - id, name, description, display order/priority |
 
-### `relationships.json` - 6,471 records
+1,145 of the 1,193 carry a `description`; the 48 that do not are artifacts the
+ontology never defines. Before `ontology/latest.json` was read that figure was
+**15** - the `/api/*` endpoints return identity fields only, so the whole
+defensive catalog reached the graph with no text to embed or search.
+
+### `relationships.json` - 5,056 records
 
 Every record is `type: "relationship"` with id, relationship_type, source_ref
 and target_ref. Two endpoint kinds below - `offensive-technique` and `weakness` -
@@ -226,13 +240,27 @@ have no entity record here; they join by bare id against another source.
 `verb` (the original D3FEND relation name) and `certainty` (`asserted` or
 `possible`).
 
+**One edge per (source, type, target).** D3FEND states some links more than once,
+each statement carrying different attributes -- one defensive technique countering the same
+ATT&CK technique through four different digital-artifact pairs. Those used to be written
+straight through as parallel edges between the same two nodes, which made
+`degree()` count a node's statements rather than its neighbours; retrieval that
+caps expansion by node degree read that as a much busier graph than it is.
+`collapse_parallel_relationships()` now merges each group into one record:
+attributes that are the same across the group stay scalar, attributes that differ
+become index-aligned lists (entry `i` of each belongs to the same original
+statement, `null` where a statement did not carry the field), and
+`merged_fields` names those lists so they can be told from a field that was
+already multi-valued on one statement. 295 of the links here are merged records;
+nothing is dropped, and expanding them reproduces the pre-merge file exactly.
+
 | `relationship_type` | Count | Endpoints |
 |---|---|---|
-| `counters` | 3,544 | technique -> ATT&CK technique id, joining `mitre-attack/entities.json`. Carries the artifact-bridge attributes |
-| `child_of` | 2,098 | weakness -> weakness (1,103), `CWE-N` ids joining `CWE/entities.json`; artifact -> artifact (995, reversed from `hasSubClass`) |
+| `counters` | 3,234 | technique -> ATT&CK technique id, joining `mitre-attack/entities.json`. Carries the artifact-bridge attributes |
+| `child_of` | 995 | artifact -> artifact, reversed from `hasSubClass`. The weakness hierarchy that used to add 1,103 more is dropped as CWE's own, see above |
 | `enables` | 149 | technique -> tactic |
-| `modifies` | 182 | ATT&CK technique -> artifact |
-| `creates` | 154 | ATT&CK technique -> artifact |
+| `modifies` | 181 | ATT&CK technique -> artifact |
+| `creates` | 153 | ATT&CK technique -> artifact |
 | `accesses` | 87 | ATT&CK technique -> artifact |
 | `observes` | 81 | technique -> artifact |
 | `executes` | 59 | ATT&CK technique -> artifact |

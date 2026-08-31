@@ -76,6 +76,14 @@ FIELDS_BY_TYPE: Dict[str, Tuple[str, ...]] = {
 # the same convention capec_preprocessing.py uses.
 EXTERNAL_RELATIONSHIP_TYPE = "related_to"
 
+# ObservedExamples get their own type rather than the generic `related_to` above. NVD's
+# own `CVE-N -> CWE-N` assignment (the CVE module's 336,339 `related_to` links) is a
+# different claim -- "this vulnerability is an instance of this weakness" -- from CWE
+# citing a CVE to illustrate itself. Sharing one type collapsed 932 of these onto an
+# NVD link of the opposite direction, which in a MERGE-based load would have dropped
+# the `description`/`link` payload that only this side carries.
+OBSERVED_EXAMPLE_RELATIONSHIP_TYPE = "has_observed_example"
+
 # RelatedWeakness Nature -> relationship_type. CWE stores only one direction per pair
 # (no ParentOf/CanFollow/RequiredBy appear), and even PeerOf is reciprocal in just 16 of
 # 98 pairs, so every edge is kept as given rather than deduped/canonicalized.
@@ -259,11 +267,10 @@ def unwrap_scalar_text(record: Dict[str, Any], *fields: str) -> Dict[str, Any]:
 
 
 def make_relationship(source_ref: str, target_ref: str, relationship_type: str, **extra: Any) -> Dict[str, Any]:
-    # `extra` is part of the seed because CWE edges legitimately repeat the same
-    # (source, type, target) with different attributes -- e.g. one ChildOf pair recorded
-    # under two View_IDs -- and those need distinct, still-deterministic ids.
+    # Seeded on the triple alone: `collapse_parallel_relationships()` leaves exactly one
+    # record per (source, type, target), so there is nothing left for `extra` to
+    # disambiguate, and an id that ignores attributes stays put when they change.
     seed_parts = [source_ref, relationship_type, target_ref]
-    seed_parts.extend(f"{key}={extra[key]}" for key in sorted(extra))
     relationship_uuid = uuid.uuid5(uuid.NAMESPACE_URL, "cwe-preprocessing:" + "|".join(seed_parts))
     record: Dict[str, Any] = {
         "id": f"relationship--{relationship_uuid}",
@@ -441,7 +448,8 @@ def build_related_attack_pattern_relationships(obj: Dict[str, Any]) -> List[Dict
 
 def build_observed_example_relationships(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
     """CVE-only: ObservedExample references that aren't a CVE id (a plain `ref`) are
-    dropped, since outward-pointing edges are scoped to CVE/CAPEC."""
+    dropped, since outward-pointing edges are scoped to CVE/CAPEC. Typed
+    `has_observed_example`, not `related_to` -- see the constant for why."""
     source_ref = f"CWE-{obj['cwe_id']}"
     relationships = []
     for item in as_list(obj.get("ObservedExamples", {}).get("ObservedExample")):
@@ -456,7 +464,7 @@ def build_observed_example_relationships(obj: Dict[str, Any]) -> List[Dict[str, 
             extra["description"] = item["Description"]
         if item.get("Link"):
             extra["link"] = item["Link"]
-        relationships.append(make_relationship(source_ref, target_ref, EXTERNAL_RELATIONSHIP_TYPE, **extra))
+        relationships.append(make_relationship(source_ref, target_ref, OBSERVED_EXAMPLE_RELATIONSHIP_TYPE, **extra))
     return relationships
 
 
@@ -608,19 +616,68 @@ def parse(objects: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     return result
 
 
+def collapse_parallel_relationships(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One record per (`source_ref`, `relationship_type`, `target_ref`).
+
+    The source states some links more than once, each statement carrying different
+    attributes -- the same `ChildOf` parent recorded under four different `view_id`s. Written straight through, those became parallel
+    edges between the same two nodes, so `degree()` counted a node's statements rather
+    than its neighbours, and retrieval that caps expansion by degree read the graph wrong.
+
+    Nothing is dropped. Attributes identical across the group stay scalar; attributes that
+    differ become a list holding one entry per original statement, in document order, and
+    a field a statement did not carry holds `null` to keep that alignment -- so entry `i`
+    of each of those lists belongs to the same original statement, and the original
+    statements are recoverable exactly. A merged record names those fields in
+    `merged_fields`, without which they could not be told apart from a field that was
+    already multi-valued on a single statement -- CWE has `has_mitigation` links whose
+    native two-entry `phase` sits on a record merged from two statements, where length
+    alone cannot say which list is which. This runs after `clean_record()`, whose list
+    handling dedupes and drops empty values, and would otherwise break the alignment
+    those lists depend on.
+    """
+    grouped: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+    for record in records:
+        key = (record["source_ref"], record["relationship_type"], record["target_ref"])
+        grouped.setdefault(key, []).append(record)
+
+    collapsed: List[Dict[str, Any]] = []
+    for group in grouped.values():
+        if len(group) == 1:
+            collapsed.append(group[0])
+            continue
+        merged = dict(group[0])
+        merged_fields = []
+        for field in dict.fromkeys(field for record in group for field in record if field != "id"):
+            values = [record.get(field) for record in group]
+            if all(value == values[0] for value in values):
+                merged[field] = values[0]
+            else:
+                merged[field] = values
+                merged_fields.append(field)
+        merged["merged_fields"] = merged_fields
+        collapsed.append(merged)
+    return collapsed
+
+
 def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> Dict[str, int]:
     """Write every entity record to entities.json and every edge to relationships.json,
     concatenated in `result`'s own insertion order so reruns are byte-stable."""
     output_dir.mkdir(parents=True, exist_ok=True)
     files: Dict[str, List[Dict[str, Any]]] = {ENTITIES_FILENAME: [], RELATIONSHIPS_FILENAME: []}
+    counts: Dict[str, int] = {}
     for key, records in result.items():
         target = RELATIONSHIPS_FILENAME if key in RELATIONSHIP_KEYS else ENTITIES_FILENAME
-        files[target].extend(clean_record(record) for record in records)
+        cleaned = [clean_record(record) for record in records]
+        if target == RELATIONSHIPS_FILENAME:
+            cleaned = collapse_parallel_relationships(cleaned)
+        files[target].extend(cleaned)
+        counts[key] = len(cleaned)
     for filename, records in files.items():
         with (output_dir / filename).open("w", encoding="utf-8") as handle:
             json.dump(records, handle, indent=2)
             handle.write("\n")
-    return {key: len(records) for key, records in result.items()}
+    return counts
 
 
 def format_counts(counts: Dict[str, int], keys: Sequence[str]) -> str:

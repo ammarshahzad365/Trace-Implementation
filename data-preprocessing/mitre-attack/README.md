@@ -249,7 +249,7 @@ Two JSON files, each a plain list of records.
 suggest (334 -> 110, 4 -> 3) because of the duplicate-id deletions above, not
 any extra filtering.
 
-### `relationships.json` - 33,181 records
+### `relationships.json` - 33,105 records
 
 Every record is `type: "relationship"` with id, relationship_type, source_ref
 and target_ref. Three origins share the file - ATT&CK's own STIX links, links
@@ -257,10 +257,24 @@ derived from embedded id-list fields, and `related_to`, the cross-catalog link
 and the only one carrying `source_name`. The name alone no longer tells you
 which is which (every type is snake_case now), so the Origin column says it.
 
+**One edge per (source, type, target).** ATT&CK states some links more than once,
+each statement carrying different attributes -- one analytic naming the same data
+component under two different `log_source`/`channel` pairs. Those used to be written
+straight through as parallel edges between the same two nodes, which made
+`degree()` count a node's statements rather than its neighbours; retrieval that
+caps expansion by node degree read that as a much busier graph than it is.
+`collapse_parallel_relationships()` now merges each group into one record:
+attributes that are the same across the group stay scalar, attributes that differ
+become index-aligned lists (entry `i` of each belongs to the same original
+statement, `null` where a statement did not carry the field), and
+`merged_fields` names those lists so they can be told from a field that was
+already multi-valued on one statement. 57 of the links here are merged records;
+nothing is dropped, and expanding them reproduces the pre-merge file exactly.
+
 | `relationship_type` | Count | Endpoints | Origin |
 |---|---|---|---|
 | `uses` | 19,988 | group/campaign/malware -> technique, and more | native |
-| `uses_data_component` | 5,042 | analytic -> data-component, carrying `log_source` and `channel` | derived |
+| `uses_data_component` | 4,966 | analytic -> data-component, carrying `log_source` and `channel` | derived |
 | `has_analytic` | 2,066 | detection-strategy -> analytic | derived |
 | `mitigates` | 2,017 | mitigation -> technique | native |
 | `has_tactic` | 1,446 | technique -> tactic | derived |
@@ -274,5 +288,5 @@ which is which (every type is snake_case now), so the Origin column says it.
 
 Every entity carries `id` and `stix_id`, and every link - native, derived and
 external alike - uses those `id` values as endpoints. Checked after every run:
-none of the 33,181 rows carries a raw STIX id in either column, and every
+none of the 33,105 rows carries a raw STIX id in either column, and every
 endpoint resolves to an entity that exists.

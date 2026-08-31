@@ -66,8 +66,15 @@ lists aligned.
     `has_member` links to each member weakness, with `view_id` as an attribute.
   - `weakness.RelatedAttackPatterns` -> `CWE-N --related_to--> CAPEC-N`
     (`source_name: "capec"`), the reverse of CAPEC's own links.
-  - `weakness.ObservedExamples` -> `CWE-N --related_to--> CVE-N`
-    (`source_name: "cve"`), with `description` and `link` as attributes.
+  - `weakness.ObservedExamples` -> `CWE-N --has_observed_example--> CVE-N`
+    (`source_name: "cve"`), with `description` and `link` as attributes. Its own
+    `relationship_type`, not the `related_to` the CAPEC links use: NVD's
+    `CVE-N -> CWE-N` classification in `CVE/relationships.json` is a different
+    claim - *this vulnerability is an instance of this weakness* - from CWE
+    citing a CVE to illustrate itself. Sharing one name put 932 of these on the
+    same endpoint pair and type as an NVD link running the other way, so a load
+    that merges on (source, type, target) would have folded them together and
+    dropped the `description`/`link` text that only this side carries.
     References that are just a bibliography id (`[REF-1374]`) are dropped, since
     outward links only go to CVE and CAPEC.
   - Those last two are the only links carrying `source_name`, which is what
@@ -214,20 +221,35 @@ The first three are CWE's own kinds; the rest are sub-records lifted out of
 | `consequence` | 311 | Deduplicated `(scope, impact)` pairs - id, scope, impact |
 | `view` | 59 | Groupings for browsing and filtering - id, name, objective, `view_type`, audience |
 
-### `relationships.json` - 16,941 records
+### `relationships.json` - 16,767 records
 
 Every record is `type: "relationship"` with id, relationship_type, source_ref
-and target_ref. The 4,337 `related_to` links point *outside* this bundle and are
-the only ones carrying `source_name`.
+and target_ref. The 1,212 `related_to` and 3,117 `has_observed_example` links
+point *outside* this bundle and are the only ones carrying `source_name`.
+
+**One edge per (source, type, target).** CWE states some links more than once,
+each statement carrying different attributes -- the same `ChildOf` parent recorded under four
+different `view_id`s, once per view that asserts it. Those used to be written
+straight through as parallel edges between the same two nodes, which made
+`degree()` count a node's statements rather than its neighbours; retrieval that
+caps expansion by node degree read that as a much busier graph than it is.
+`collapse_parallel_relationships()` now merges each group into one record:
+attributes that are the same across the group stay scalar, attributes that differ
+become index-aligned lists (entry `i` of each belongs to the same original
+statement, `null` where a statement did not carry the field), and
+`merged_fields` names those lists so they can be told from a field that was
+already multi-valued on one statement. 134 of the links here are merged records;
+nothing is dropped, and expanding them reproduces the pre-merge file exactly.
 
 | `relationship_type` | Count | Endpoints |
 |---|---|---|
 | `has_member` | 5,024 | category/view -> weakness |
-| `related_to` | 4,337 | weakness -> CVE (3,125, from `ObservedExamples`) or -> CAPEC (1,212, from `RelatedAttackPatterns`) |
+| `has_observed_example` | 3,117 | weakness -> CVE, from `ObservedExamples`. Carries `description` and `link` |
+| `related_to` | 1,212 | weakness -> CAPEC, from `RelatedAttackPatterns` |
 | `applies_to_platform` | 2,072 | weakness -> platform |
-| `has_mitigation` | 1,710 | weakness -> mitigation |
-| `child_of` | 1,318 | weakness -> weakness |
-| `has_consequence` | 1,237 | weakness -> consequence |
+| `has_mitigation` | 1,704 | weakness -> mitigation |
+| `child_of` | 1,160 | weakness -> weakness. `view_id` is a list where the same parent is asserted in several views |
+| `has_consequence` | 1,235 | weakness -> consequence |
 | `has_detection_method` | 959 | weakness -> detection-method |
 | `can_precede` | 143 | weakness -> weakness |
 | `peer_of` | 98 | weakness -> weakness |
