@@ -218,6 +218,33 @@ def clean_value(value: Any) -> Any:
     return value
 
 
+def read_collected_at(manifest_path: Path) -> str | None:
+    """When the acquisition layer last fetched this source, read from its manifest.
+
+    Deliberately the *crawl* time and not this run's wall clock. Stamping records with
+    the moment preprocessing happened to run would make every rerun differ, and
+    byte-identical reruns are what lets a checksum tell "the source changed" apart from
+    "I ran it again". This value only moves when the crawler actually refetched."""
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        print(f"[mitre-defend-parser] warning: no readable manifest at {manifest_path}; records get no collected_at", file=sys.stderr)
+        return None
+    collected_at = manifest.get("last_successful_fetch") or manifest.get("generated_at")
+    if not collected_at:
+        print(f"[mitre-defend-parser] warning: {manifest_path.name} has no fetch timestamp; records get no collected_at", file=sys.stderr)
+    return collected_at
+
+
+def stamp_collected_at(record: Dict[str, Any], collected_at: str | None) -> Dict[str, Any]:
+    """Add the source's crawl time to a finished record. Applied last -- after
+    `clean_record()` and any relationship collapse -- so field order stays stable and the
+    value is never mistaken for a source field that differs across merged records."""
+    if collected_at:
+        record["collected_at"] = collected_at
+    return record
+
+
 def clean_record(record: Dict[str, Any]) -> Dict[str, Any]:
     """Run every property through `clean_value`, dropping those left empty. Applied once
     per record on the way out, so no builder has to remember to trim or dedupe itself."""
@@ -584,7 +611,7 @@ def collapse_parallel_relationships(records: List[Dict[str, Any]]) -> List[Dict[
     return collapsed
 
 
-def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> Dict[str, int]:
+def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path, collected_at: str | None) -> Dict[str, int]:
     """Write every entity record to entities.json and every edge to relationships.json,
     concatenated in `result`'s own insertion order so reruns are byte-stable."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -599,7 +626,7 @@ def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> 
         counts[key] = len(cleaned)
     for filename, records in files.items():
         with (output_dir / filename).open("w", encoding="utf-8") as handle:
-            json.dump(records, handle, indent=2)
+            json.dump([stamp_collected_at(record, collected_at) for record in records], handle, indent=2)
             handle.write("\n")
     return counts
 
@@ -626,7 +653,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         domains = {domain: load_domain(Path(args.input), domain) for domain in DOMAIN_FILES}
-        counts = write_outputs(parse(domains), output_dir)
+        collected_at = read_collected_at(Path(args.input) / "manifest.json")
+        counts = write_outputs(parse(domains), output_dir, collected_at)
         entity_keys = [key for key in counts if key not in RELATIONSHIP_KEYS]
         print(
             f"[mitre-defend-parser] wrote {format_counts(counts, entity_keys)} entities to {ENTITIES_FILENAME} "

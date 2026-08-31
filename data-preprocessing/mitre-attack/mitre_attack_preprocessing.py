@@ -185,6 +185,45 @@ def clean_value(value: Any) -> Any:
     return value
 
 
+def read_collected_at(input_dir: Path) -> str | None:
+    """Latest crawl time across ATT&CK's three domain manifests.
+
+    Deliberately the *crawl* time and not this run's wall clock: stamping records with
+    the moment preprocessing happened to run would make every rerun differ, and
+    byte-identical reruns are what lets a checksum tell "the source changed" apart from
+    "I ran it again". The three domains are fetched seconds apart within one crawl and
+    their objects are merged into a single output here, so one timestamp stands for all
+    three; the latest is the honest one to quote."""
+    stamps: List[str] = []
+    for relative in DOMAIN_LATEST_FILES:
+        manifest_path = input_dir / Path(relative).parent / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        collections = manifest.get("collections")
+        if isinstance(collections, dict):
+            stamps.extend(
+                entry["last_successful_fetch"] for entry in collections.values()
+                if isinstance(entry, dict) and entry.get("last_successful_fetch")
+            )
+        if manifest.get("generated_at"):
+            stamps.append(manifest["generated_at"])
+    if not stamps:
+        print(f"[mitre-attack-parser] warning: no readable domain manifest under {input_dir}; records get no collected_at", file=sys.stderr)
+        return None
+    return max(stamps)
+
+
+def stamp_collected_at(record: Dict[str, Any], collected_at: str | None) -> Dict[str, Any]:
+    """Add the source's crawl time to a finished record. Applied last -- after
+    `clean_record()` and any relationship collapse -- so field order stays stable and the
+    value is never mistaken for a source field that differs across merged records."""
+    if collected_at:
+        record["collected_at"] = collected_at
+    return record
+
+
 def clean_record(record: Dict[str, Any]) -> Dict[str, Any]:
     """Run every property through `clean_value`, dropping those left empty. Applied once
     per record on the way out, so no builder has to remember to trim or dedupe itself."""
@@ -577,7 +616,7 @@ def collapse_parallel_relationships(records: List[Dict[str, Any]]) -> List[Dict[
     return collapsed
 
 
-def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> Dict[str, int]:
+def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path, collected_at: str | None) -> Dict[str, int]:
     """Write every entity record to entities.json and every edge to relationships.json,
     concatenated in `result`'s own insertion order so reruns are byte-stable."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -592,7 +631,7 @@ def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> 
         counts[key] = len(cleaned)
     for filename, records in files.items():
         with (output_dir / filename).open("w", encoding="utf-8") as handle:
-            json.dump(records, handle, indent=2)
+            json.dump([stamp_collected_at(record, collected_at) for record in records], handle, indent=2)
             handle.write("\n")
     return counts
 
@@ -619,7 +658,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         result = parse(load_objects(Path(args.input)))
-        counts = write_outputs(result, output_dir)
+        collected_at = read_collected_at(Path(args.input))
+        counts = write_outputs(result, output_dir, collected_at)
         entity_keys = [key for key in counts if key not in RELATIONSHIP_KEYS]
         relationship_keys = [key for key in counts if key in RELATIONSHIP_KEYS]
         print(

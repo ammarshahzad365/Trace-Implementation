@@ -37,7 +37,7 @@ py CWE/cwe_preprocessing.py
 ## What comes out
 
 Exactly 10 files - an `entities.json` and a `relationships.json` in each of the
-five source folders. Four rules hold for all of them:
+five source folders. Five rules hold for all of them:
 
 - **Nothing nests.** Every value is a single value or a list of single values -
   never a map, never a record inside a record. Every nested field in the source
@@ -48,6 +48,15 @@ five source folders. Four rules hold for all of them:
 - **Entities and links are separate files.** Inside each file, a record's own
   `type` field says what kind it is (`weakness`, `attack-technique`,
   `vulnerability`, ...), so nothing else is needed to tell the kinds apart.
+- **Every record says when it was collected.** `collected_at` is on every entity and
+  every link, taken from that source's `data-acquisition/<SOURCE>/manifest.json`
+  (`last_successful_fetch`, falling back to `generated_at`) - the time the *crawler*
+  last fetched, never the time preprocessing happened to run. That distinction is what
+  keeps the rule below true: a wall-clock stamp would make every re-run differ, and a
+  checksum could no longer tell "the source changed" apart from "I ran it again".
+  ATT&CK merges three domain bundles fetched seconds apart, so it quotes the latest of
+  the three. It is one value per source per crawl, so it costs about 9 MB across the
+  766,161 records and never varies within a file.
 - **Re-runs are byte-identical.** Generated ids are `uuid5` hashes of the
   record's own content, never random, so re-processing unchanged input produces
   an unchanged file.
