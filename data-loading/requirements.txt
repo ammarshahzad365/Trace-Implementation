@@ -1,2 +1,6 @@
-neo4j>=5.28
+neo4j>=5.28,<7
 ijson>=3.2
+
+# Only needed for the ingest API (ingest/), not for the batch loader.
+fastapi>=0.110
+uvicorn>=0.27

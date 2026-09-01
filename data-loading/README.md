@@ -116,6 +116,9 @@ brings everything back exactly as it was.
 `~/.bashrc` carries one line, `ulimit -n 40000`, because Neo4j wants more open
 files than a login shell grants by default.
 
+The [ingest API](ingest/README.md) is a second process alongside Neo4j, started
+and stopped the same way. It is optional — the graph is fully usable without it.
+
 ## Connecting to the graph
 
 The database is bound to `127.0.0.1`, so it is unreachable over the network by
@@ -125,8 +128,11 @@ design. Reach it by forwarding its two ports to your own machine.
 connection:
 
 ```bash
-ssh -L 7474:localhost:7474 -L 7687:localhost:7687 you@the-server
+ssh -L 7474:localhost:7474 -L 7687:localhost:7687 -L 8000:localhost:8000 you@the-server
 ```
+
+7474 is the Browser, 7687 is Bolt, 8000 is the [ingest API](ingest/README.md).
+Drop the third if you only want to look.
 
 **2. Browse to <http://localhost:7474>** and log in:
 
@@ -252,6 +258,26 @@ record with no id or type, a value Neo4j cannot store. Reported but survivable:
 a dangling endpoint — 4 exist, all CWE citing CVEs NVD never published. Details
 in [`graphload/validate.py`](graphload/validate.py).
 
+## Adding data after the load
+
+The loader is for the five catalogues. To add records to a graph that is already
+up — a new CVE, an internal finding, a hand-curated mapping — there is an HTTP
+API in [`ingest/`](ingest/). It runs on the server beside Neo4j, and you reach it
+through the same tunnel:
+
+```bash
+# on the server, from ~/trace/data-loading
+setsid nohup ../.venv/bin/python -m ingest.serve </dev/null > ~/ingest.log 2>&1 &
+```
+
+Then POST to <http://localhost:8000/ingest>, or use the interactive page at
+<http://localhost:8000/docs> to add records from the browser.
+
+It writes through this same engine, so a record added that way is
+indistinguishable from a loaded one. See [`ingest/README.md`](ingest/README.md).
+For hundreds of thousands of records, declare a source and use the loader
+instead — the next section.
+
 ## Adding a new data source
 
 Nothing in `graphload/` changes.
@@ -333,7 +359,8 @@ Docs sit next to the code and explain **why**, not what.
 | How do I connect to the graph? | "Connecting to the graph", above |
 | How do I draw it? | "Visualising it", above |
 | How do I start/stop it? | "Running it on the server", above |
-| How do I add a source? | "Adding a new data source", above |
+| How do I add a few records? | [`ingest/README.md`](ingest/README.md) |
+| How do I add a whole source? | "Adding a new data source", above |
 | Why rename nothing? | [`graphload/properties.py`](graphload/properties.py) |
 | Why a separate bridges stage? | [`graphload/router.py`](graphload/router.py) |
 | Why constraints first? | [`graphload/schema.py`](graphload/schema.py) |
