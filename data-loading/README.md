@@ -1,323 +1,278 @@
 # Loading the dataset into Neo4j (stage 3)
 
-Turns the ten files under [`../data-preprocessing/`](../data-preprocessing/) into
-one Neo4j graph. It is the last stage: [`data-acquisition/`](../data-acquisition/)
-downloads, [`data-preprocessing/`](../data-preprocessing/) cleans, this loads.
+Turns the ten files under [`../data-preprocessing/`](../data-preprocessing/)
+into one Neo4j graph: 372,739 nodes and 393,418 relationships, in about two
+minutes.
 
 ## The one rule
 
-**This loader does not preprocess.** It moves records into Neo4j; it does not
-change what they mean. No field is renamed, no value is derived, no link is
-retyped, no duplicate is merged, no provenance is stamped on. A property in the
-graph can always be traced to a field documented in a source's
-`data-preprocessing/<SOURCE>/README.md`, spelled the same way.
+**This loader does not preprocess.** No field is renamed, no value derived, no
+link retyped, no duplicate merged. Every property in the graph traces back to a
+field documented in a source's preprocessing README, spelled the same way.
 
-There are exactly two exceptions, both about Cypher rather than about meaning,
-both mechanical and reversible, and both listed per type in
-[`catalog/labels.py`](catalog/labels.py):
+Two exceptions, both about Cypher syntax rather than meaning, both declared per
+type in [`catalog/labels.py`](catalog/labels.py):
 
-| | Example | Why |
+| Rename | Example | Why |
 |---|---|---|
-| Node labels PascalCase | `attack-technique` → `AttackTechnique` | `MATCH (t:attack-technique)` is a Cypher **syntax error**. 12 of the 25 type values contain a hyphen. |
-| Relationship types UPPER_SNAKE | `child_of` → `CHILD_OF` | Neo4j convention. Not strictly required — the current values are all legal as-is. |
+| Labels → PascalCase | `attack-technique` → `AttackTechnique` | `MATCH (t:attack-technique)` is a **syntax error**; 12 of 25 types have hyphens |
+| Relationship types → UPPER_SNAKE | `child_of` → `CHILD_OF` | Neo4j convention |
 
-If you want `related_to` on a CVE→CWE edge to say `HAS_WEAKNESS` instead, that
-is a modelling decision that needs domain knowledge, and it belongs in
-`data-preprocessing/` where it can be documented next to the raw field it came
-from. Putting it here would make the graph disagree with the docs that describe
-its own inputs.
+Wanting `related_to` to say `HAS_WEAKNESS` is a modelling decision needing
+domain knowledge, so it belongs in `data-preprocessing/`. See
+[`graphload/properties.py`](graphload/properties.py).
 
 ## Two packages
 
-- **[`graphload/`](graphload/)** is a general-purpose property-graph loader. It
-  knows about *entity records* (each has an id and a type) and *edge rows* (each
-  has a type and two endpoint ids). It contains no mention of CVE, CWE, STIX or
-  cybersecurity anywhere.
-- **[`catalog/`](catalog/)** is everything about *this* dataset, as declarations
-  rather than logic: five source specs and two name maps.
+- **[`graphload/`](graphload/)** — a general-purpose property-graph loader.
+  Knows about entity records and edge rows; mentions CVE, CWE and STIX nowhere.
+- **[`catalog/`](catalog/)** — this dataset, as declarations: five source specs
+  and two name maps. No logic.
 
-`catalog/` imports `graphload/`; `graphload/` never imports `catalog/`. That is
-enforced — `py main.py --self-check` fails if it ever does. Pointing this at a
-different dataset means writing a new `catalog/`, not editing the engine.
+`catalog/` imports `graphload/`, never the reverse. `py main.py --self-check`
+enforces it. Retargeting at another dataset means a new `catalog/`.
 
 ## Quick start
 
 ```bash
-# 1. one-time: dependencies
 py -m pip install -r requirements.txt
-
-# 2. check the data before you need a database at all
-py main.py --dry-run
-
-# 3. start a database (see below), then confirm Python can reach it
-py main.py --check
-
-# 4. load
-py main.py
+py main.py --dry-run      # validate the files; needs no database
+py main.py --check        # confirm Python can reach the database
+py main.py                # load
 ```
 
-Then open <http://localhost:7474>, log in as `neo4j`, and try
-[`queries.cypher`](queries.cypher).
+**You run this once.** Neo4j writes the graph to disk, so it survives restarts,
+reboots and crashes on its own — there is nothing to re-run and nothing to keep
+alive to hold the data. Load again only when the source data changes, i.e. after
+`data-acquisition/incremental_crawler.py` and `data-preprocessing/main.py` have
+produced new files.
+
+Then open the graph — see [Connecting to the graph](#connecting-to-the-graph).
 
 ## Starting a database
 
-**Locally, with Docker** — [`docker-compose.yml`](docker-compose.yml) reads the
-password from the repo-root `.env`:
+**Locally, with Docker:**
 
 ```bash
 docker compose --env-file ../.env up -d      # start
-docker compose --env-file ../.env down       # stop, keep the data
-docker volume rm data-loading_neo4j-data     # throw the graph away
+docker compose --env-file ../.env down       # stop, keep data
+docker volume rm data-loading_neo4j-data     # discard the graph
 ```
 
-Two things that bite:
+Two things bite. `NEO4J_AUTH` applies only to a database being created for the
+first time — pointed at an existing volume, a container keeps that volume's old
+password whatever `.env` says. And Neo4j refuses to start if
+`heap.max + pagecache` exceeds physical memory; on a ~3.9 GB Docker VM that
+arrives fast, and the symptom is a container restarting forever with `Invalid
+memory configuration`.
 
-- **`NEO4J_AUTH` only applies to a database being created for the first time.**
-  Point a container at an existing data volume and it keeps that volume's
-  original password, whatever `.env` now says. If you have lost it, remove the
-  volume — that is the only way back.
-- **Neo4j refuses to start if `heap.max + pagecache` exceeds physical memory.**
-  On a default Windows Docker VM (~3.9 GB) that ceiling arrives fast; the
-  symptom is a container that restarts forever with `Invalid memory
-  configuration` in `docker logs trace-neo4j`. The compose file is sized to fit.
-
-**On a server with no Docker and no root** — a shared university host, say —
-use the unix tarball, which installs entirely inside `$HOME`:
+**On a server with no Docker and no root**, use the tarball — it installs
+entirely inside `$HOME`:
 
 ```bash
 mkdir -p ~/opt && cd ~/opt
 curl -LO https://dist.neo4j.org/neo4j-community-5.26.20-unix.tar.gz
 tar -xzf neo4j-community-5.26.20-unix.tar.gz && mv neo4j-community-5.26.20 neo4j
 ~/opt/neo4j/bin/neo4j-admin dbms set-initial-password 'your-password'
-
-ulimit -n 40000            # Neo4j wants 40000; the usual soft limit is 1024
-~/opt/neo4j/bin/neo4j start
 ```
 
-Needs Java 17 or 21. Put the `ulimit` line in `~/.bashrc` — raising it needs no
-root as long as the *hard* limit is already high (`ulimit -Hn` to check). Leave
-`server.default_listen_address=127.0.0.1` in `conf/neo4j.conf` and reach it
-through an SSH tunnel rather than exposing a database on a shared host:
+Needs Java 17 or 21. Add to `conf/neo4j.conf` (the loaded store is ~514 MB, so
+4 GB of page cache holds it resident):
+
+```
+server.default_listen_address=127.0.0.1
+server.memory.heap.initial_size=4g
+server.memory.heap.max_size=4g
+server.memory.pagecache.size=4g
+db.transaction.timeout=60m
+```
+
+**Credentials** come from the repo-root `.env`; a real environment variable
+beats it, so loading elsewhere for one run needs no file edit.
+
+```ini
+NEO4J_PASSWORD=...                    # required
+NEO4J_URI=bolt://localhost:7687       # optional, the default
+NEO4J_USER=neo4j                      # optional
+NEO4J_DATABASE=neo4j                  # optional
+```
+
+## Running it on the server
+
+Three commands:
+
+```bash
+~/opt/neo4j/bin/neo4j start
+~/opt/neo4j/bin/neo4j stop
+~/opt/neo4j/bin/neo4j status      # "Neo4j is running at pid NNNN"
+```
+
+`start` puts it in the background and it keeps running after you log out.
+
+The one thing to know: **after the server reboots, SSH in and run `start`
+again.** Nothing is lost when it is down -- the graph is on disk, so starting it
+brings everything back exactly as it was.
+
+`~/.bashrc` carries one line, `ulimit -n 40000`, because Neo4j wants more open
+files than a login shell grants by default.
+
+## Connecting to the graph
+
+The database is bound to `127.0.0.1`, so it is unreachable over the network by
+design. Reach it by forwarding its two ports to your own machine.
+
+**1. Open the tunnel** and leave that terminal open — the tunnel *is* the
+connection:
 
 ```bash
 ssh -L 7474:localhost:7474 -L 7687:localhost:7687 you@the-server
 ```
 
-**Credentials** come from the repo-root `.env`, and a real environment variable
-always beats it — so loading somewhere else for one run needs no file edit:
+**2. Browse to <http://localhost:7474>** and log in:
 
-```ini
-NEO4J_PASSWORD=...                    # required
-NEO4J_URI=bolt://localhost:7687       # optional, this is the default
-NEO4J_USER=neo4j                      # optional
-NEO4J_DATABASE=neo4j                  # optional
+| Connect URL | `bolt://localhost:7687` |
+|---|---|
+| Username | `neo4j` |
+| Password | from the server's `.env` |
+
+Both ports are forwarded because the Browser is a web page on 7474 that itself
+speaks Bolt on 7687. Forward only the first and the page loads but cannot
+connect.
+
+Closing the tunnel stops nothing — it closes your view, not the database.
+
+**If the tunnel will not bind**, something local holds those ports: a Docker
+Neo4j, or an older tunnel of your own. Identify it before assuming — `netstat
+-ano | findstr "7474 7687"` on Windows, `ss -ltnp | grep -E ':(7474|7687)'`
+elsewhere. Then either stop it, or use different local ports:
+
+```bash
+ssh -L 7475:localhost:7474 -L 7688:localhost:7687 you@the-server
+# http://localhost:7475, connect URL bolt://localhost:7688
 ```
+
+`py main.py --check` confirms which database you actually reached — the version
+and node count tell you whether it is the server's or a local one.
+
+## Visualising it
+
+In the Neo4j Browser, type a query into the bar at the top and press Ctrl+Enter.
+**What you get back depends on what the query returns**, which is the one thing
+worth knowing up front:
+
+- Return **nodes, relationships or a `path`** and you get a drawn graph.
+- Return **scalars** (`count(*)`, a property, a string) and you get a table.
+  There is nothing to draw, so no amount of clicking will produce a picture.
+
+Start with the shape of the whole model — 25 labels and how they connect:
+
+```cypher
+CALL db.schema.visualization();
+```
+
+Then a real subgraph. This is the chain the project exists for, for one CVE:
+
+```cypher
+MATCH path = (v:Vulnerability {id: 'CVE-2021-44228'})-[:RELATED_TO]->(:Weakness)
+      -[:RELATED_TO]->(:AttackPattern)-[:RELATED_TO]->(:AttackTechnique)
+      <-[:COUNTERS]-(:DefensiveTechnique)
+RETURN path LIMIT 25;
+```
+
+Once a graph is drawn:
+
+- **Click a node** to select it; its properties appear in a panel below.
+- **Double-click a node** to expand its neighbours and grow the picture.
+- **Click a label chip** at the top of the result pane, then pick a property, to
+  change what the circles are captioned with — `id` or `name` is usually far
+  more useful than the default.
+- **Drag** to rearrange, scroll to zoom, and use the pane's expand icon for
+  fullscreen.
+- The Browser caps how many nodes it draws (`:config initialNodeDisplay`), so a
+  `LIMIT` on exploratory queries keeps things legible rather than a hairball.
+
+Beware the tempting `MATCH (n) RETURN n` — with 372,739 nodes it will not draw
+anything useful. Always anchor on something specific and `LIMIT`.
+
+[`queries.cypher`](queries.cypher) has a starter set, every query in it run
+against the loaded graph: the schema, the full traversal, the defences answering
+the most critical CVEs, and the sanity checks worth repeating after a reload.
 
 ## Usage
 
 ```
 py main.py                                   # everything, in order
-py main.py --check                           # connectivity + what is in the DB
+py main.py --check                           # connectivity + current contents
 py main.py --self-check                      # assert the engine/catalog split
-py main.py --dry-run                         # validate + report, write nothing
+py main.py --dry-run                         # validate, write nothing
 py main.py --stage nodes edges --only capec cwe
 py main.py --stage bridges                   # after adding a source
-py main.py --stage verify                    # read-only counts
 py main.py --limit 500 --dry-run             # fast trial on unfamiliar data
 ```
 
-Also: `--skip`, `--batch-size`, `--no-cache`, `--allow-new-labels`.
+Also `--skip`, `--batch-size`, `--no-cache`, `--allow-new-labels`.
 
-`--dry-run` needs no database — that is the point of it, so `verify` is dropped
-from the default stage list when it is on. Every run writes
-`.cache/load_report.json` with per-stage counts, timings and warnings. Diff it
-after a re-crawl to see what actually changed.
+`--dry-run` needs no database, so `verify` drops out of the default stage list
+when it is on. `--limit` produces alarming dangling-endpoint warnings that are
+an artefact — edges past the limit point at entities never read; it checks that
+a source parses, not that it connects.
 
-Note that `--limit` produces alarming dangling-endpoint warnings, and they are
-an artefact: edges past the limit point at entities that were never read. It is
-for checking that a new source parses, not for checking that it connects.
+Every run writes `.cache/load_report.json` — counts, timings, warnings. Diff it
+after a re-crawl to see what changed.
 
-### What a full load looks like
-
-Measured 2026-08-31 against Neo4j 5.26 in Docker (1.5 GB heap, 1 GB page cache):
-
-| Stage | Time | Result |
-|---|---|---|
-| constraints | 1.8s | 25 constraints, indexes online |
-| nodes | 72.0s | 372,739 nodes across 25 labels |
-| edges | 12.7s | 48,701 rows, 26 types |
-| bridges | 29.5s | 344,717 rows, 8 types |
-| verify | 4.1s | 372,739 nodes / 393,418 relationships, 0 without an id |
-| **total** | **120.1s** | |
-
-The counts reconcile exactly against the input: 372,739 entity records in, all
-loaded; 393,422 edge rows in, 4 skipped as dangling, 393,418 loaded. Those four
-are CWE citing CVE ids NVD rejected or never published (`CWE-345`, `CWE-362`,
-`CWE-1233`, `CWE-1421`), and they are the only ones in the whole dataset.
-
-56,973 nodes end up isolated, 56,702 of them CVEs with no CWE mapping at all.
-That is the data, not the load — worth knowing before reading anything into
-coverage numbers.
-
-### Re-running is safe
-
-Nodes and relationships are `MERGE`d on their ids, so a second run updates what
-changed and adds what is new rather than duplicating anything. That is what
-makes this the thing to run after `data-acquisition/incremental_crawler.py`
-picks up new CVEs.
-
-Verified rather than assumed: an immediate second full load produced the same
-372,739 nodes and 393,418 relationships, and took 70s instead of 120s — the
-registry resolves from its per-source cache instead of re-streaming 402 MB of
-CVE JSON.
-
-Properties are written with `SET n = row.props`, not `+=`, which makes the graph
-an exact mirror of the files: a field dropped upstream disappears on reload
-instead of leaving a stale value behind. The trade is that anything you set by
-hand in the Browser does not survive the next load. This graph is a projection
-of `data-preprocessing/`, not a place to keep work.
+**Re-running is safe.** Records are `MERGE`d on their ids, so a second run
+updates rather than duplicates; a verification reload produced identical totals
+in 70s instead of 120s, off the registry cache. Properties are written
+`SET n = row.props`, not `+=`, so the graph mirrors the files exactly — a field
+dropped upstream disappears rather than lingering, and anything set by hand in
+the Browser does not survive. See [`graphload/batch.py`](graphload/batch.py).
 
 ## The five stages
 
 Order is a dependency chain, not a preference.
 
-| Stage | What it does | Needs first |
+| Stage | Does | Needs first |
 |---|---|---|
-| **1. constraints** | one uniqueness constraint (and so, one index) per label | — |
-| **2. nodes** | entity records become nodes; honours `--only`/`--skip` | constraints |
-| **3. edges** | edges whose endpoints are both in the source that declared them | that source's nodes |
-| **4. bridges** | edges crossing between sources | **all** sources' nodes |
-| **5. verify** | read-only counts and checks | — |
+| **constraints** | one uniqueness constraint, so one index, per label | — |
+| **nodes** | entity records become nodes; honours `--only`/`--skip` | constraints |
+| **edges** | edges with both endpoints in the declaring source | that source's nodes |
+| **bridges** | edges crossing between sources | **all** sources' nodes |
+| **verify** | read-only counts and checks | — |
 
-**Stage 1 existing before stage 2 is the single most consequential thing in the
-loader.** Each of the 393,418 edges looks its two endpoints up by id — 786,836
-lookups. Backed by an index that is an instant seek; unbacked it is a scan of a
-several-hundred-thousand-node label. The same load goes from minutes to hours.
-`stages/constraints.py` also waits for `db.awaitIndexes()`, because an index
-still POPULATING is not used by the planner — skipping the wait silently buys
-you the slow version anyway.
+Constraints first is the most consequential thing here — 393,418 edges mean
+786,836 endpoint lookups, indexed seeks versus full label scans, minutes versus
+hours ([`schema.py`](graphload/schema.py)). Bridges are separate because a
+cross-source edge cannot resolve until every source is loaded, which is what
+makes `--only cwe` usable ([`router.py`](graphload/router.py)). Which edges are
+which is decided by **endpoints, not filenames**: only 1,310 of D3FEND's 5,056
+rows stay inside D3FEND, while all 336,339 CVE rows leave it.
 
-**Stage 4 is separate because the data forces it.** Cross-source edges cannot
-resolve until every source's nodes exist. Keeping them apart is what makes
-`--only cwe` work: you can reload one source and its internal links without
-CVE's 336,339 cross-catalog rows failing to find their targets, then run
-`--stage bridges` once at the end.
-
-Which edges those are is decided by **endpoints, not filenames**, and this is
-not a detail. `mitre-defend/relationships.json` sounds internal and mostly is
-not — only 1,310 of its 5,056 rows are D3FEND-to-D3FEND, while thousands point
-at ATT&CK ids and over a thousand live entirely in CWE's id space. Conversely
-`CVE/relationships.json` sounds internal and is entirely cross-source: all
-336,339 rows point from a CVE at a CWE. See
-[`graphload/router.py`](graphload/router.py).
-
-## The model
-
-**Labels** come from each record's own `type`, PascalCased, per
-[`catalog/labels.py`](catalog/labels.py) — 25 entity types across 25 labels.
-Two groups are judgement calls rather than translations: D3FEND's
-`technique`/`tactic` become `DefensiveTechnique`/`DefensiveTactic` so they
-cannot be confused with ATT&CK's, and the `x-mitre-` prefix is dropped from
-labels because it marks a STIX custom extension — a fact about the file format,
-not about the entity. The records' own fields keep their prefixes verbatim:
-`x_mitre_platforms` stays `x_mitre_platforms`.
-
-**Relationship types** come from each row's own `relationship_type`,
-uppercased. No overrides are currently needed.
-
-**Properties** are every remaining field, under its own name. The only fields
-that do not become properties are the ones that became structure: a record's
-`type`, and an edge row's `type`/`relationship_type`/`source_ref`/`target_ref`.
-`id` stays a property, because it is how every edge finds the node and how a
-reload updates rather than duplicates. `null` values are skipped, because
-`SET n.x = null` deletes a property in Cypher and there is no way to store one.
-
-## Reading 500 MB of JSON without 5 GB of RAM
-
-`CVE/entities.json` is 402 MB and `CVE/relationships.json` 95 MB, both
-pretty-printed. Parsed with `json.load`, the CVE folder alone peaks at several
-GB of Python objects — on a machine that may also be running the Neo4j heap. So
-every file is streamed record-by-record through `ijson`
-([`graphload/readers/json_array.py`](graphload/readers/json_array.py)) and
-memory stays flat regardless of file size.
-
-Edges cannot be streamed quite so naively, because they have to be *grouped* by
-`(source label, type, target label)` before writing — that triple is what fixes
-the Cypher statement. Collecting all of them first would cost more than the
-whole load's memory budget, so `batch.GroupedWriter` flushes a group as soon as
-it fills a batch, and flushes the largest group early if total buffering crosses
-a ceiling. One pass, bounded memory, any number of groups.
-
-## What stops a bad load
-
-[`graphload/validate.py`](graphload/validate.py) is the gate. Fatal:
-
-- **A duplicate entity id** — the worst failure mode available, because it does
-  not error. Two records sharing an id `MERGE` into one node whose properties
-  are a blend of two unrelated things, and nothing downstream ever looks wrong.
-- **A type with no entry in `catalog/labels.py`** — an invented label is how
-  half of a future ATT&CK release quietly ends up somewhere nobody queries.
-  `--allow-new-labels` downgrades this to a warning *and reports every name it
-  derived*, for when you are deliberately loading something new.
-- **A record with no id or no type**, which cannot become a node at all.
-
-Reported but never fatal:
-
-- **A dangling endpoint** — an edge naming an id no entity claims. Not always a
-  bug: a catalog can legitimately cite an id another catalog rejected or never
-  published. The edge is skipped and counted; the missing node is never
-  invented, which is the only behaviour consistent with not preprocessing.
-
-A value Neo4j cannot store (a map, a nested list) stops the load with the
-record and field named. It is *rejected*, not flattened — flattening would be
-preprocessing.
-
-The gates run after each stage that reads records, which is after that stage's
-writes. Catching a duplicate id without reading every record first is
-impossible, and reading everything twice would double the slowest part of the
-load. `--dry-run` is the pass that catches it with nothing written at all — run
-it first on unfamiliar data.
+Fatal on load: a duplicate entity id, a type missing from `catalog/labels.py`, a
+record with no id or type, a value Neo4j cannot store. Reported but survivable:
+a dangling endpoint — 4 exist, all CWE citing CVEs NVD never published. Details
+in [`graphload/validate.py`](graphload/validate.py).
 
 ## Adding a new data source
 
-Nothing in `graphload/` changes. The whole job is a new module in
-`catalog/sources/` plus two edits.
+Nothing in `graphload/` changes.
 
-### 1. Make `data-preprocessing/` emit it
-
-The loader reads what that stage produces, so the source has to exist there
-first, following its
-[output rules](../data-preprocessing/README.md): two files, nothing nested, ids
-readable, entities and links separate, every record carrying its own `type`.
-
-The minimum an entity record needs:
+**1. Have `data-preprocessing/` emit it** — two files, following its
+[output rules](../data-preprocessing/README.md):
 
 ```json
-{ "id": "SOMETHING-1", "type": "some-kind", "name": "...", "description": "..." }
-```
-
-and an edge row:
-
-```json
+{ "id": "SOMETHING-1", "type": "some-kind", "name": "..." }
 { "id": "relationship--<uuid5>", "type": "relationship",
   "relationship_type": "some_link", "source_ref": "SOMETHING-1", "target_ref": "CWE-79" }
 ```
 
-Two things matter more than they look:
+Two points matter more than they look. `id` must be unique across the *whole*
+graph, not just the new source — it is the node key, and a collision silently
+merges unrelated records. And to link into an existing catalogue, **use that
+catalogue's ids verbatim** (`CWE-79`, `T1055`). That is the entire mechanism;
+there is no mapping table, because the router resolves endpoints through the
+registry and classifies the edge itself.
 
-- **`id` must be unique across the whole graph**, not just within the new
-  source. It is the node key, and a collision with an existing id silently
-  merges two unrelated records. The loader will catch it, but upstream is where
-  it gets fixed.
-- **To link into an existing catalog, use that catalog's ids verbatim**
-  (`CWE-79`, `T1055`, `CVE-2021-44228`). That is the entire mechanism —
-  there is no mapping table to register a cross-source link in. The router
-  resolves both endpoints through the registry and classifies the edge as a
-  bridge on its own.
-
-### 2. Declare it
-
-Create `catalog/sources/<yourname>.py`:
+**2. Declare it** in `catalog/sources/<name>.py`:
 
 ```python
 from graphload.spec import EdgeFile, EntityFile, SourceSpec
@@ -326,102 +281,63 @@ SPEC = SourceSpec(
     key="atlas",                          # what --only/--skip match on
     label="ATLAS",                        # display name in run output
     root="data-preprocessing/ATLAS",      # relative to the repo root
-    files=(
-        EntityFile("entities.json"),
-        EdgeFile("relationships.json"),
-    ),
+    files=(EntityFile("entities.json"), EdgeFile("relationships.json")),
 )
 ```
 
-Write a module docstring saying what the source contributes and anything
-surprising about its shape — every existing one does, and it is where the next
-person looks first.
+**3. Register it** — import it in [`catalog/sources/__init__.py`](catalog/sources/__init__.py)
+and add `SPEC` to `SOURCES`. Put big sources last, so a mistake in a small one
+surfaces before 402 MB of JSON streams.
 
-### 3. Register it
+**4. Map its types** — one `LABELS` entry per `type` value in
+[`catalog/labels.py`](catalog/labels.py). Skipping this stops the load with the
+list of types to add; that is the gate working, not a bug.
 
-In [`catalog/sources/__init__.py`](catalog/sources/__init__.py), import the
-module and add `SPEC` to `SOURCES`. Order affects only the readability of a
-run's output, but put big sources last so a mistake in a small one surfaces
-before 402 MB of JSON has streamed.
-
-### 4. Map its types
-
-In [`catalog/labels.py`](catalog/labels.py), add one `LABELS` entry per `type`
-value the new source emits. Most are mechanical — `graphload/naming.py` would
-derive `AttackPattern` from `attack-pattern` unaided — but list them anyway:
-the map doubles as the declared label set that stage 1 builds indexes from, and
-as the gate that stops an unrecognised type instead of inventing a label for it.
-
-Skip this and the load stops with the list of types to add. That is the gate
-working, not a bug.
-
-Reuse an existing label deliberately if the new source's records really are the
-same kind of thing; the ids stay distinct, so they stay distinct nodes.
-
-### 5. Load it
+**5. Load it:**
 
 ```bash
 py main.py --dry-run --limit 500 --only atlas   # does it parse?
-py main.py --dry-run --only atlas               # do the types map, ids collide?
+py main.py --dry-run --only atlas               # types map? ids collide?
 py main.py --stage nodes edges --only atlas     # load it alone
-py main.py --stage bridges                      # then wire it to everything else
+py main.py --stage bridges                      # wire it to everything else
 ```
 
-That last step is not optional and is easy to forget: `--only atlas` loads only
-the edges that stay inside ATLAS. Every link into CWE or ATT&CK is a bridge, and
-bridges are all-sources by definition.
+That last step is easy to forget: `--only atlas` loads only edges staying inside
+ATLAS, and every link into CWE or ATT&CK is a bridge.
 
-### If the shape differs
+**If the shape differs**, pass a shape —
+`EntityFile("nodes.json", shape=RecordShape(id="uuid", type="kind"))` — or name
+a reader — `EntityFile("data.jsonl", reader="jsonl")`. CSV delivers every value
+as a string and the loader will not guess types from text; that is preprocessing.
 
-Neither of these is common, and neither needs an engine change:
-
-- **Different field names.** Pass a shape:
-  `EntityFile("nodes.json", shape=RecordShape(id="uuid", type="kind"))`, or
-  `EdgeFile("links.json", shape=EdgeShape(type="rel", source="from", target="to"))`.
-  The shape's fields are also exactly the ones that become structure instead of
-  properties.
-- **A different file format.** `EntityFile("data.jsonl", reader="jsonl")`.
-  `json_array`, `jsonl` and `csv` ship; a new format is a new function in
-  [`graphload/readers/`](graphload/readers/) registered in its `REGISTRY`. Note
-  that CSV delivers every value as a string and the loader will not guess types
-  from text — that is preprocessing.
-
-### What not to add
-
-There is deliberately no place in `catalog/` to put a field rename, a derived
-value, a retyped link or a merge rule, and adding one would be a category
-error. If the new source needs any of that to be useful, it needs it in
-`data-preprocessing/`, where the decision can be documented beside the raw field
-it came from and re-run independently of the database.
+**What not to add:** there is deliberately nowhere in `catalog/` for a field
+rename, derived value, retyped link or merge rule. If a source needs that, it
+needs it in `data-preprocessing/`.
 
 ## Known limitations
 
-- **`RELATED_TO` is the largest relationship type in the graph** (336,339 of
-  them, all CVE→CWE), because that is what the data says. It is NVD's weakness
-  classification and a better name would be `HAS_WEAKNESS` — but knowing that
-  requires knowing what NVD means by the field, so it is a
-  `data-preprocessing/` change, not one to make here.
-- **`USES` conflates several relationships** for the same reason: ATT&CK states
-  `uses` for a group using malware, malware using a technique and a tool used in
-  a campaign. Distinguish them by endpoint labels in a query, or upstream.
-- **Community edition means one database.** `NEO4J_DATABASE` exists, but on
-  Community there is nowhere else to point it. Loading a second copy side by
-  side means a second server.
-- **No node carries which catalog it came from.** Mostly the label implies it.
-  If you want it explicit, have `data-preprocessing/` emit the field and the
-  loader will carry it across like any other.
+- `RELATED_TO` is the largest type (336,339 CVE→CWE) because that is what the
+  data says. `USES` conflates several relationships for the same reason.
+- 56,973 nodes are isolated, 56,702 of them CVEs with no CWE mapping. That is
+  the data, not the load — worth knowing before reading into coverage numbers.
+- Community edition means one database; `NEO4J_DATABASE` has nowhere else to go.
+- No node records which catalogue it came from. If wanted, preprocessing should
+  emit the field and the loader will carry it.
 
 ## Where to read what
 
-Docs sit next to the code they describe and explain **why**, not what.
+Docs sit next to the code and explain **why**, not what.
 
 | Question | Read |
 |---|---|
-| How do I run it? | this file |
-| How do I add a source? | this file, "Adding a new data source" |
-| Why is the engine split from the catalog? | [`graphload/__init__.py`](graphload/__init__.py) |
-| Why does the loader not rename anything? | [`graphload/properties.py`](graphload/properties.py) |
-| Why is there a separate bridges stage? | [`graphload/router.py`](graphload/router.py) |
-| Why do constraints come first? | [`graphload/schema.py`](graphload/schema.py) |
-| Why `SET n =` and not `SET n +=`? | [`graphload/batch.py`](graphload/batch.py) |
+| How do I connect to the graph? | "Connecting to the graph", above |
+| How do I draw it? | "Visualising it", above |
+| How do I start/stop it? | "Running it on the server", above |
+| How do I add a source? | "Adding a new data source", above |
+| Why rename nothing? | [`graphload/properties.py`](graphload/properties.py) |
+| Why a separate bridges stage? | [`graphload/router.py`](graphload/router.py) |
+| Why constraints first? | [`graphload/schema.py`](graphload/schema.py) |
+| Why `SET n =` not `+=`? | [`graphload/batch.py`](graphload/batch.py) |
+| Why stream the input? | [`graphload/readers/json_array.py`](graphload/readers/json_array.py) |
+| What stops a bad load? | [`graphload/validate.py`](graphload/validate.py) |
 | What do the input files look like? | [`../data-preprocessing/README.md`](../data-preprocessing/README.md) |
