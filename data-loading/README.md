@@ -343,12 +343,11 @@ needs it in `data-preprocessing/`.
 ## Known limitations
 
 - `RELATED_TO` is the largest type (336,339 CVE→CWE) because that is what the
-  data says. `USES` conflates several relationships for the same reason.
+  data says. `USES` conflates several relationships for the same reason. Constrain
+  both endpoint labels when querying either.
 - 56,973 nodes are isolated, 56,702 of them CVEs with no CWE mapping. That is
   the data, not the load — worth knowing before reading into coverage numbers.
 - Community edition means one database; `NEO4J_DATABASE` has nowhere else to go.
-- No node records which catalogue it came from. If wanted, preprocessing should
-  emit the field and the loader will carry it.
 
 ## Where to read what
 

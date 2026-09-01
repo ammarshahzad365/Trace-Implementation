@@ -52,11 +52,23 @@ STATE: dict[str, Any] = {}
 
 
 class Entity(BaseModel):
-    """One node. `id` and `type` are required; every other field is a property."""
+    """One node. `id` and `type` are required; every other field is a property.
+
+    `source` is declared rather than left to `extra` because it is not an
+    ordinary property: `data-preprocessing/` stamps one on every record it emits,
+    and entity alignment uses it to tell same-named nodes from different
+    catalogs apart. Records posted without one are accepted, but they arrive in
+    the graph less identifiable than everything already there.
+    """
 
     model_config = ConfigDict(extra="allow")
     id: str = Field(examples=["CVE-2026-99999"])
     type: str = Field(examples=["vulnerability"])
+    source: str | None = Field(
+        default=None,
+        description="Which catalog or document asserted this record. Set it.",
+        examples=["apt-report"],
+    )
 
 
 class Relationship(BaseModel):

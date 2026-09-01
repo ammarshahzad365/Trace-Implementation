@@ -48,6 +48,12 @@ five source folders. Five rules hold for all of them:
 - **Entities and links are separate files.** Inside each file, a record's own
   `type` field says what kind it is (`weakness`, `attack-technique`,
   `vulnerability`, ...), so nothing else is needed to tell the kinds apart.
+- **Every record says which catalog asserted it.** `source` is on every entity and
+  every link, holding this folder's own name for itself (`cve`, `cwe`, `capec`,
+  `mitre-attack`, `mitre-defend`). It is what tells two same-named records from
+  different catalogs apart once they leave here, and it is distinct from the
+  `source_name` a few links carry, which names the *foreign* catalog a
+  cross-catalog link points at.
 - **Every record says when it was collected.** `collected_at` is on every entity and
   every link, taken from that source's `data-acquisition/<SOURCE>/manifest.json`
   (`last_successful_fetch`, falling back to `generated_at`) - the time the *crawler*

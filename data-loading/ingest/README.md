@@ -108,20 +108,30 @@ curl -X POST http://localhost:8000/ingest \
 
 ### What a record needs
 
-An **entity** needs `id` and `type`. Everything else you send becomes a
-property under that name — nothing is renamed or interpreted.
+An **entity** needs `id` and `type`, and should carry `source`. Everything else
+you send becomes a property under that name — nothing is renamed or interpreted.
 
 ```json
-{ "id": "CVE-2026-99999", "type": "vulnerability", "anything_else": "becomes a property" }
+{ "id": "CVE-2026-99999", "type": "vulnerability", "source": "apt-report",
+  "anything_else": "becomes a property" }
 ```
+
+`source` names whichever catalog or document asserted the record. Every record
+from `data-preprocessing/` carries one (`cve`, `cwe`, `capec`, `mitre-attack`,
+`mitre-defend`), and entity alignment uses it to tell same-named nodes from
+different sources apart. Posting without it is accepted but leaves the node
+harder to place than everything already in the graph.
 
 A **relationship** needs `id`, `relationship_type`, `source_ref` and
 `target_ref`. Other fields become properties on the relationship.
 
 ```json
 { "id": "relationship--unique-1", "relationship_type": "related_to",
-  "source_ref": "CVE-2026-99999", "target_ref": "CWE-79" }
+  "source_ref": "CVE-2026-99999", "target_ref": "CWE-79", "source": "apt-report" }
 ```
+
+Note `source` and `source_ref` are unrelated: the first says who asserted the
+link, the second is one of its endpoints.
 
 This is the same shape `data-preprocessing/` emits, so anything valid in those
 files is valid here.

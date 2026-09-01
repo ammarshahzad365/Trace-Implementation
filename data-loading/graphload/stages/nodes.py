@@ -9,10 +9,14 @@ hundred megabytes of JSON twice would be the slowest part of the whole load:
    endpoints from a pickle instead of re-reading the files.
 
 Every field except the record's `type` becomes a property under its own name.
-No provenance property is stamped on and nothing is renamed -- see
-`graphload/properties.py`. If you want to know which catalog a node came from,
-that is `data-preprocessing/`'s to emit; the loader will carry it faithfully the
-moment it appears in the file.
+The loader still stamps nothing on and renames nothing -- see
+`graphload/properties.py`.
+
+Which catalog a node came from arrives as an ordinary `source` property, because
+`data-preprocessing/` now emits one on every record. That is the division of
+labour working as intended: the fact is asserted where it can be documented
+beside the data it describes, and the loader carries it across like any other
+field rather than inventing it here.
 """
 
 from __future__ import annotations

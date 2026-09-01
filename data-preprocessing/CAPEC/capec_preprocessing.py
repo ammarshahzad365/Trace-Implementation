@@ -212,10 +212,28 @@ def read_collected_at(manifest_path: Path) -> str | None:
     return collected_at
 
 
-def stamp_collected_at(record: Dict[str, Any], collected_at: str | None) -> Dict[str, Any]:
-    """Add the source's crawl time to a finished record. Applied last -- after
-    `clean_record()` and any relationship collapse -- so field order stays stable and the
-    value is never mistaken for a source field that differs across merged records."""
+# Stamped onto every record by `stamp_provenance()`. Required by TRACE §3.2.4, and
+# what entity alignment keys on to tell same-named nodes from different catalogs apart.
+SOURCE = "capec"
+
+
+def stamp_provenance(record: Dict[str, Any], collected_at: str | None) -> Dict[str, Any]:
+    """Add this catalog's name and its crawl time to a finished record. Applied last --
+    after `clean_record()` and any relationship collapse -- so field order stays stable and
+    the value is never mistaken for a source field that differs across merged records.
+
+    `source` answers "which catalog asserted this record", and every record carries one.
+    It is deliberately not the same thing as the `source_name` a few links carry, which
+    names the *foreign* catalog a cross-catalog link points at: on a CVE link,
+    `source: "cve"` says NVD asserted it and `source_name: "cwe"` says the target is a CWE.
+
+    Today the value is derivable from the record's kind -- measured against the loaded
+    graph, no node label and no relationship shape is claimed by two catalogs, because
+    cross-catalog restatements are already deduplicated upstream. It is stamped anyway for
+    two reasons. TRACE requires it outright (§3.2.4), and entity alignment keys on it: the
+    moment nodes start arriving from unstructured text, two records of the same type and
+    similar description have nothing else to tell them apart by."""
+    record["source"] = SOURCE
     if collected_at:
         record["collected_at"] = collected_at
     return record
@@ -432,7 +450,7 @@ def write_outputs(result: Dict[str, List[Dict[str, Any]]], output_dir: Path, col
         files[target].extend(clean_record(record) for record in records)
     for filename, records in files.items():
         with (output_dir / filename).open("w", encoding="utf-8") as handle:
-            json.dump([stamp_collected_at(record, collected_at) for record in records], handle, indent=2)
+            json.dump([stamp_provenance(record, collected_at) for record in records], handle, indent=2)
             handle.write("\n")
     return {key: len(records) for key, records in result.items()}
 
