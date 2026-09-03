@@ -22,6 +22,7 @@ batch. 25 round trips for a batch of any size, rather than one scan per row.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Iterable, Mapping, Sequence
 
 from neo4j import Session
@@ -34,6 +35,20 @@ from graphload.properties import properties
 # `graphload/spec.py`'s RecordShape/EdgeShape defaults.
 ENTITY_STRUCTURAL = ("type",)
 EDGE_STRUCTURAL = ("type", "relationship_type", "source_ref", "target_ref")
+
+# The fields TRACE section 3.2.4 requires on every record. `id`/`type` (or
+# `relationship_type`/`source_ref`/`target_ref`) are structural -- the loader
+# cannot place the record without them. `source` is not structural but is
+# required anyway: it is what lets entity alignment tell two same-named nodes
+# from different documents apart, which is exactly the case unstructured
+# extraction produces. Everything else on a record is a plain property and is
+# entirely up to the caller.
+_MISSING_SOURCE = "missing 'source' -- required so this record can be told apart from others of the same id/type"
+
+
+def _now() -> str:
+    """Same format `data-acquisition/*/client.py` stamps: seconds precision, `Z`."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 class IngestError(ValueError):
@@ -66,10 +81,17 @@ def write_entities(
     *,
     label_overrides: Mapping[str, str],
     declared_labels: Sequence[str],
-    allow_new_labels: bool,
     batch_size: int = 1_000,
 ) -> dict:
-    """MERGE each record as a node. Returns per-label counts."""
+    """MERGE each record as a node. Returns per-label counts.
+
+    `type` is never rejected for being unrecognised -- it is derived into a
+    label mechanically (`threat-actor` -> `ThreatActor`) unless
+    `label_overrides` names something more specific, exactly as
+    `catalog/labels.py` does for the five structured catalogs. Extraction from
+    unstructured sources will keep introducing types this project has not seen
+    yet; the API's job is to place them, not to gate them.
+    """
     grouped: dict[str, list[dict]] = {}
     for index, record in enumerate(records):
         entity_id = record.get("id")
@@ -78,18 +100,17 @@ def write_entities(
             raise IngestError(f"entities[{index}]: missing 'id'")
         if not type_value:
             raise IngestError(f"entities[{index}] ({entity_id}): missing 'type'")
+        if not record.get("source"):
+            raise IngestError(f"entities[{index}] ({entity_id}): {_MISSING_SOURCE}")
+
+        record = dict(record)
+        record.setdefault("collected_at", _now())
 
         type_value = str(type_value)
-        if type_value in label_overrides:
-            label = label_overrides[type_value]
-        elif allow_new_labels:
-            label = to_label(type_value)
-        else:
-            raise IngestError(
-                f"entities[{index}] ({entity_id}): type {type_value!r} is not declared in "
-                f"catalog/labels.py. Known types: {', '.join(sorted(label_overrides))}. "
-                "Add it there, or start the server with --allow-new-labels."
-            )
+        try:
+            label = label_overrides.get(type_value) or to_label(type_value)
+        except ValueError as exc:
+            raise IngestError(f"entities[{index}] ({entity_id}): {exc}") from exc
 
         props = properties(
             record, structural=ENTITY_STRUCTURAL, what=label, record_id=str(entity_id)
@@ -133,6 +154,8 @@ def write_relationships(
         for field in ("id", "relationship_type", "source_ref", "target_ref"):
             if not row.get(field):
                 raise IngestError(f"relationships[{index}]: missing {field!r}")
+        if not row.get("source"):
+            raise IngestError(f"relationships[{index}]: {_MISSING_SOURCE}")
         endpoint_ids.add(str(row["source_ref"]))
         endpoint_ids.add(str(row["target_ref"]))
 
@@ -141,6 +164,8 @@ def write_relationships(
     grouped: dict[tuple[str, str, str], list[dict]] = {}
     dangling: list[dict] = []
     for row in rows:
+        row = dict(row)
+        row.setdefault("collected_at", _now())
         source_id, target_id = str(row["source_ref"]), str(row["target_ref"])
         source_label, target_label = labels.get(source_id), labels.get(target_id)
         if source_label is None or target_label is None:

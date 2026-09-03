@@ -54,7 +54,7 @@ in the `pkill` pattern are not a typo — `pkill -f 'ingest.serve'` matches its 
 command line and kills the shell you typed it in before it reaches the API.
 
 It reads `NEO4J_PASSWORD` from the repo-root `.env` like everything else.
-Options: `--port`, `--allow-new-labels`, `--host`.
+Options: `--port`, `--host`.
 
 It binds to **127.0.0.1** on purpose. This endpoint writes to the graph with no
 authentication, which is fine over loopback reached through an SSH tunnel and is
@@ -73,7 +73,7 @@ add a handful of records.
 | | |
 |---|---|
 | `GET /health` | Is it up, is Neo4j reachable, and what is in the graph |
-| `GET /schema` | Which entity types are accepted, which relationship types exist |
+| `GET /schema` | Which fields are required, and which types are already known |
 | `POST /ingest` | Add or update records |
 
 ## Adding records
@@ -108,22 +108,25 @@ curl -X POST http://localhost:8000/ingest \
 
 ### What a record needs
 
-An **entity** needs `id` and `type`, and should carry `source`. Everything else
-you send becomes a property under that name — nothing is renamed or interpreted.
+An **entity** needs `id`, `type` and `source` — nothing else is optional.
+Everything else you send becomes a property under that name — nothing is
+renamed or interpreted.
 
 ```json
 { "id": "CVE-2026-99999", "type": "vulnerability", "source": "apt-report",
   "anything_else": "becomes a property" }
 ```
 
-`source` names whichever catalog or document asserted the record. Every record
-from `data-preprocessing/` carries one (`cve`, `cwe`, `capec`, `mitre-attack`,
-`mitre-defend`), and entity alignment uses it to tell same-named nodes from
-different sources apart. Posting without it is accepted but leaves the node
-harder to place than everything already in the graph.
+`source` names whichever catalog or document asserted the record — every
+record from `data-preprocessing/` already carries one (`cve`, `cwe`, `capec`,
+`mitre-attack`, `mitre-defend`), and entity alignment uses it to tell
+same-named nodes from different sources apart. It is required here, not just
+recommended, because a record with no source is exactly the case alignment
+cannot resolve. `collected_at` is not required — if you leave it out, the API
+stamps the current time itself.
 
-A **relationship** needs `id`, `relationship_type`, `source_ref` and
-`target_ref`. Other fields become properties on the relationship.
+A **relationship** needs `id`, `relationship_type`, `source_ref`, `target_ref`
+and `source`. Other fields become properties on the relationship.
 
 ```json
 { "id": "relationship--unique-1", "relationship_type": "related_to",
@@ -153,20 +156,19 @@ node. Always send the whole record. This is deliberate — it keeps the graph an
 exact mirror of what was last asserted rather than an accumulation of every
 version.
 
-**`type` must already be known.** It is checked against
-[`../catalog/labels.py`](../catalog/labels.py), and an unrecognised one is
-rejected with the list of valid types. That gate is why a typo cannot silently
-create a second label nobody queries. To add a genuinely new kind of thing, add
-it to that file — or start with `--allow-new-labels` to derive labels on the
-fly, accepting the typo risk that comes with it.
-
-`GET /schema` lists the 25 accepted types at any time.
+**`type` is never rejected for being unrecognised.** There is no fixed list to
+match against here the way the batch loader checks
+[`../catalog/labels.py`](../catalog/labels.py) — any value derives its own
+label (`threat-actor` -> `ThreatActor`), because this endpoint exists
+specifically to take in entities that an unstructured extraction pass names for
+the first time. `known_entity_types` in `GET /schema` is a reference for what
+the five structured catalogs already use, not a gate on what you can post.
 
 ## When something is wrong
 
 | Status | Means |
 |---|---|
-| `422` | The request is malformed: a missing field, an undeclared `type`, or a value Neo4j cannot store (a nested object or list of lists). The message names the record and field. |
+| `422` | The request is malformed: a missing required field (`id`, `type`/`relationship_type`, `source`, or an endpoint ref), or a value Neo4j cannot store (a nested object or list of lists). The message names the record and field. |
 | `400` | Nothing to do — both lists empty. |
 | `503` | Neo4j is not reachable from the API. Check `~/opt/neo4j/bin/neo4j status` on the server. |
 

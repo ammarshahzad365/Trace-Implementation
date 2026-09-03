@@ -2,13 +2,18 @@
 
     py -m ingest.serve                      # http://127.0.0.1:8000
     py -m ingest.serve --port 8080
-    py -m ingest.serve --allow-new-labels   # accept entity types not in catalog/
 
 Binds to 127.0.0.1 by default, deliberately. This endpoint writes to the graph
 with no authentication, which is safe over a loopback socket reached through the
 same SSH tunnel as Neo4j itself, and is not safe on `0.0.0.0`. `--host` exists
 for running behind something that does provide auth; the warning it prints is
 meant to be read.
+
+Any entity `type` is accepted -- there is no `--allow-new-labels` switch here
+the way `main.py` (the batch loader) has one. That flag exists there to guard
+the five structured catalogs against a crawl accidentally inventing a label;
+this API's whole purpose is taking in entities unstructured extraction names
+for the first time, so gating `type` would defeat the point of it.
 """
 
 from __future__ import annotations
@@ -24,12 +29,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Serve the Trace ingest API")
     parser.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (loopback only)")
     parser.add_argument("--port", type=int, default=8000, help="default: 8000")
-    parser.add_argument(
-        "--allow-new-labels",
-        action="store_true",
-        help="accept entity types that are not declared in catalog/labels.py, deriving "
-        "a label and creating its uniqueness constraint on first use",
-    )
     args = parser.parse_args(argv)
 
     try:
@@ -40,22 +39,13 @@ def main(argv: list[str] | None = None) -> int:
             "    py -m pip install -r requirements.txt"
         ) from None
 
-    from ingest.api import STATE, app
-
-    STATE["allow_new_labels"] = args.allow_new_labels
+    from ingest.api import app
 
     if args.host not in ("127.0.0.1", "localhost"):
         print(
             f"WARNING: binding to {args.host}, so anything that can reach this port can "
             "write to the graph. There is no authentication. Put it behind something "
             "that provides some, or use an SSH tunnel and leave the default.",
-            file=sys.stderr,
-        )
-    if args.allow_new_labels:
-        print(
-            "NOTE: --allow-new-labels is on. An unrecognised entity type will create a new "
-            "label instead of being rejected, which is how a typo becomes a second label "
-            "nobody queries.",
             file=sys.stderr,
         )
 
