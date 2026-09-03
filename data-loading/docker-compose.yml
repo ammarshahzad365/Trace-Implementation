@@ -1,16 +1,24 @@
-# Neo4j for the Trace knowledge graph -- the local development option.
+# Neo4j, the ingest API, and the batch loader -- the local dev / cloud option.
 #
 # Run it from this folder, pointing at the repo-root .env for the password:
 #
-#     docker compose --env-file ../.env up -d
-#     docker compose --env-file ../.env down          # stop, keep the data
-#     docker volume rm data-loading_neo4j-data        # throw the graph away
+#     docker compose --env-file ../.env up -d          # neo4j + api
+#     docker compose --env-file ../.env down            # stop, keep the data
+#     docker volume rm data-loading_neo4j-data          # throw the graph away
 #
-# Then open http://localhost:7474 and log in as `neo4j`.
+# Then open http://localhost:7474 (Browser, log in as `neo4j`) and
+# http://localhost:8000/docs (the ingest API).
+#
+# The batch loader is a one-off job, not a long-running service, so it's
+# behind a profile rather than started by `up`:
+#
+#     docker compose --env-file ../.env --profile tools run --rm loader \
+#         python main.py --check
 #
 # On a machine without Docker -- a shared university host, say -- install the
-# tarball into your home directory instead. See the README, "Starting a
-# database", which also covers the two settings below that have no equivalent
+# Neo4j tarball into your home directory instead, and run the API from a venv.
+# See the READMEs ("Starting a database", ingest/README.md) -- that section
+# also covers the two Neo4j memory settings below, which have no equivalent
 # there.
 #
 # Memory: heap holds the working set of a transaction, page cache holds the
@@ -26,6 +34,12 @@
 #
 # `db.transaction.timeout` is generous because a batch of 10,000 CVE nodes with
 # long descriptions is a big single transaction.
+#
+# `api` and `loader` reach Neo4j at `bolt://neo4j:7687`, not `localhost` --
+# inside this file's network, service names are the hostnames. That is the one
+# place Docker's own networking actually does something for this project;
+# outside compose (bare processes, or a cloud deployment with Neo4j elsewhere)
+# NEO4J_URI just points wherever it needs to.
 
 services:
   neo4j:
@@ -49,6 +63,43 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+
+  api:
+    build: .
+    container_name: trace-ingest-api
+    restart: unless-stopped
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    ports:
+      - "8000:8000"   # http://localhost:8000/docs
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?set NEO4J_PASSWORD in the repo-root .env}
+      # Unset (the default) leaves /ingest open, which is fine here -- this
+      # port only reaches your own machine. Set it before publishing this
+      # service anywhere else reachable; see ingest/README.md.
+      INGEST_API_KEY: ${INGEST_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # A job, not a service -- `up` never starts this on its own.
+  #     docker compose --profile tools run --rm loader python main.py --check
+  loader:
+    build: .
+    profiles: ["tools"]
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?set NEO4J_PASSWORD in the repo-root .env}
+    volumes:
+      - ../data-preprocessing:/app/data-preprocessing:ro
+      - ./.cache:/app/data-loading/.cache
 
 volumes:
   neo4j-data:

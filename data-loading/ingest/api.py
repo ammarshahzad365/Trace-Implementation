@@ -31,10 +31,12 @@ there is valid here, and vice versa.
 
 from __future__ import annotations
 
+import os
+import secrets
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from neo4j import GraphDatabase
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -53,6 +55,25 @@ from .writer import IngestError, write_entities, write_relationships
 BAD_REQUEST = (IngestError, PropertyError)
 
 STATE: dict[str, Any] = {}
+
+
+def require_api_key(authorization: str | None = Header(default=None)) -> None:
+    """Gate on `INGEST_API_KEY` if it's set; a no-op if it isn't.
+
+    Unset is what the loopback-plus-SSH-tunnel deployment on the university
+    server wants -- reachable only by someone who already has a shell there,
+    so a second secret adds nothing. Set is what a cloud deployment needs: the
+    port is reachable from the open internet, and `/ingest` writes to the
+    graph, so anyone who finds the URL can otherwise add or overwrite anything
+    with any `source`. `secrets.compare_digest` avoids leaking the key one
+    character at a time through response-timing differences.
+    """
+    expected = os.environ.get("INGEST_API_KEY")
+    if not expected:
+        return
+    given = (authorization or "").removeprefix("Bearer ")
+    if not secrets.compare_digest(given, expected):
+        raise HTTPException(401, "Missing or invalid 'Authorization: Bearer <key>' header")
 
 
 class Entity(BaseModel):
@@ -173,7 +194,7 @@ def schema() -> dict:
     }
 
 
-@app.post("/ingest")
+@app.post("/ingest", dependencies=[Depends(require_api_key)])
 def ingest(request: IngestRequest) -> dict:
     """Add or update records. Entities are written first, then relationships.
 

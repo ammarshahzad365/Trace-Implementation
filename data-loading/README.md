@@ -119,6 +119,32 @@ files than a login shell grants by default.
 The [ingest API](ingest/README.md) is a second process alongside Neo4j, started
 and stopped the same way. It is optional — the graph is fully usable without it.
 
+## Running it in containers
+
+`docker-compose.yml` also builds and runs the API and the batch loader now, not
+just Neo4j:
+
+```bash
+docker compose --env-file ../.env up -d                          # neo4j + api
+docker compose --env-file ../.env --profile tools run --rm loader \
+    python main.py --check                                       # one-off job
+```
+
+`api` and `loader` reach Neo4j at `bolt://neo4j:7687` — inside this file,
+service names are hostnames, which is the one place Docker's own networking
+does something for this project. `loader` mounts `../data-preprocessing` and
+`./.cache` from the host, read-only for the former, because those are data,
+not image content — the image ships code only, never the 478 MB the five
+catalogues produce. The API needs neither; it never reads those files.
+
+**This is also the shape for running the API somewhere other than the
+university server** — a cloud host, say. Two things change from the local-dev
+compose file: `NEO4J_URI` has to point wherever Neo4j actually lives (the
+image doesn't care, it just reads the environment), and the ingest API needs
+locking down — see [ingest/README.md](ingest/README.md#running-it-somewhere-reachable),
+because a container's `-p 8000:8000` makes it reachable from wherever the host
+is reachable from, not just from you.
+
 ## Connecting to the graph
 
 The database is bound to `127.0.0.1`, so it is unreachable over the network by
