@@ -167,34 +167,30 @@ the five structured catalogs already use, not a gate on what you can post.
 ## Running it somewhere reachable
 
 Everything above assumes the API is only reachable through the SSH tunnel —
-that's what makes it safe to run with no authentication. Running it as a
-container published on a cloud host is a different situation: `docker run -p
-8000:8000` (or a cloud load balancer) makes `/ingest` reachable from wherever
-that host is reachable from, which for most clouds means the open internet.
-At that point "no authentication" stops being a loopback-only convenience and
-becomes anyone-can-write-to-the-graph.
+that's what makes it safe to run with no authentication. Binding it anywhere
+else is a different situation: `--host 0.0.0.0` makes `/ingest` reachable from
+wherever the machine is reachable from. At that point "no authentication" stops
+being a loopback-only convenience and becomes anyone-can-write-to-the-graph.
 
 Set `INGEST_API_KEY` before that happens:
 
 ```bash
-docker run --rm -p 8000:8000 \
-  -e NEO4J_URI=bolt://your-neo4j-host:7687 \
-  -e NEO4J_PASSWORD=... \
-  -e INGEST_API_KEY=$(openssl rand -hex 32) \
-  trace-loader
+export NEO4J_URI=bolt://your-neo4j-host:7687
+export INGEST_API_KEY=$(openssl rand -hex 32)
+python -m ingest.serve --host 0.0.0.0
 ```
 
 Every `POST /ingest` then needs `Authorization: Bearer <that key>`:
 
 ```bash
-curl -X POST https://your-host/ingest \
+curl -X POST http://your-host:8000/ingest \
   -H "Authorization: Bearer $INGEST_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{ "entities": [...] }'
 ```
 
 `GET /health` and `GET /schema` stay open either way — they're read-only, and
-a load balancer's health check has no way to send a bearer token. Unset (the
+whatever is polling for liveness has no way to send a bearer token. Unset (the
 default), `INGEST_API_KEY` changes nothing, which is why the university-server
 deployment above needs no changes at all.
 
@@ -203,9 +199,8 @@ pipeline posts here," not for "many people with different permissions post
 here." If that's ever the shape you need, put a real gateway in front rather
 than extending this.
 
-[`../Dockerfile`](../Dockerfile) builds the image; `python main.py --check`
-against the same image confirms whichever Neo4j `NEO4J_URI` points at *before*
-it means writing anything.
+`python main.py --check` confirms whichever Neo4j `NEO4J_URI` points at *before*
+starting the API against it means writing anything.
 
 ## When something is wrong
 

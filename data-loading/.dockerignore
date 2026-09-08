@@ -1,8 +1,0 @@
-# The image ships code only. Data, caches and secrets are host state that
-# come in as volumes or env vars at `docker run` time -- see Dockerfile.
-__pycache__/
-*.pyc
-.cache/
-.pytest_cache/
-.venv/
-*.json

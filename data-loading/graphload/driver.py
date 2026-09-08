@@ -20,7 +20,7 @@ from .config import Settings
 # wrong". `AuthError` covers a plain bad password, but repeated attempts trip
 # `Neo.ClientError.Security.AuthenticationRateLimit`, which arrives as a bare
 # ClientError -- and if that one is not caught, the retry loop someone wrote to
-# wait for a container to come up ends in 40 lines of driver stack trace.
+# wait for the server to finish starting ends in 40 lines of driver stack trace.
 CONNECTION_ERRORS = (AuthError, ClientError, ServiceUnavailable)
 
 
@@ -51,9 +51,10 @@ def unreachable(exc: Exception, settings: Settings) -> SystemExit:
         return SystemExit(
             f"Neo4j is rate-limiting authentication for {settings.redacted} after too many "
             "failed attempts. Wait a few seconds and try again with the right password.\n"
-            "A container started against an existing data volume keeps that volume's "
-            "original password -- NEO4J_AUTH only applies to a database being created for "
-            "the first time. See data-loading/README.md, 'Starting a database'."
+            "`neo4j-admin dbms set-initial-password` only applies to a store that has never "
+            "been started -- against an existing one it does nothing, so the database keeps "
+            "whatever password it was created with whatever .env says. See "
+            "data-loading/README.md, 'Starting a database'."
         )
     if isinstance(exc, ClientError):
         return SystemExit(f"Neo4j refused the connection to {settings.redacted}: {exc}")

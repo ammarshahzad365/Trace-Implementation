@@ -3,8 +3,8 @@
 No third-party dotenv dependency -- the file is a handful of `KEY=value` lines,
 and a real environment variable always wins over it, so exporting `NEO4J_URI`
 for a single run works without editing anything. That matters when the same
-checkout is loaded against a local Docker Neo4j and a remote one over an SSH
-tunnel.
+checkout is loaded against a scratch database on one machine and the real one
+over an SSH tunnel.
 
 `repo_root()` walks up from this file rather than trusting the working
 directory, so every path in `catalog/` can be written relative to the repo root

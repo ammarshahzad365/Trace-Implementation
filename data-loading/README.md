@@ -51,23 +51,8 @@ Then open the graph — see [Connecting to the graph](#connecting-to-the-graph).
 
 ## Starting a database
 
-**Locally, with Docker:**
-
-```bash
-docker compose --env-file ../.env up -d      # start
-docker compose --env-file ../.env down       # stop, keep data
-docker volume rm data-loading_neo4j-data     # discard the graph
-```
-
-Two things bite. `NEO4J_AUTH` applies only to a database being created for the
-first time — pointed at an existing volume, a container keeps that volume's old
-password whatever `.env` says. And Neo4j refuses to start if
-`heap.max + pagecache` exceeds physical memory; on a ~3.9 GB Docker VM that
-arrives fast, and the symptom is a container restarting forever with `Invalid
-memory configuration`.
-
-**On a server with no Docker and no root**, use the tarball — it installs
-entirely inside `$HOME`:
+The tarball needs neither root nor a package manager — it installs entirely
+inside `$HOME`, which is what makes it work on a shared university host:
 
 ```bash
 mkdir -p ~/opt && cd ~/opt
@@ -86,6 +71,16 @@ server.memory.heap.max_size=4g
 server.memory.pagecache.size=4g
 db.transaction.timeout=60m
 ```
+
+Two things bite. `set-initial-password` applies only to a store that has never
+been started — run against an existing one it does nothing, so the database keeps
+the password it was created with whatever `.env` says. And Neo4j refuses to start
+at all if `heap.max + pagecache` exceeds physical memory; the symptom is a
+process that dies immediately with `Invalid memory configuration` in
+`logs/neo4j.log`. Size those two down before assuming anything else is wrong.
+
+`db.transaction.timeout` is generous because a batch of 10,000 CVE nodes with
+long descriptions is one large transaction.
 
 **Credentials** come from the repo-root `.env`; a real environment variable
 beats it, so loading elsewhere for one run needs no file edit.
@@ -119,32 +114,6 @@ files than a login shell grants by default.
 The [ingest API](ingest/README.md) is a second process alongside Neo4j, started
 and stopped the same way. It is optional — the graph is fully usable without it.
 
-## Running it in containers
-
-`docker-compose.yml` also builds and runs the API and the batch loader now, not
-just Neo4j:
-
-```bash
-docker compose --env-file ../.env up -d                          # neo4j + api
-docker compose --env-file ../.env --profile tools run --rm loader \
-    python main.py --check                                       # one-off job
-```
-
-`api` and `loader` reach Neo4j at `bolt://neo4j:7687` — inside this file,
-service names are hostnames, which is the one place Docker's own networking
-does something for this project. `loader` mounts `../data-preprocessing` and
-`./.cache` from the host, read-only for the former, because those are data,
-not image content — the image ships code only, never the 478 MB the five
-catalogues produce. The API needs neither; it never reads those files.
-
-**This is also the shape for running the API somewhere other than the
-university server** — a cloud host, say. Two things change from the local-dev
-compose file: `NEO4J_URI` has to point wherever Neo4j actually lives (the
-image doesn't care, it just reads the environment), and the ingest API needs
-locking down — see [ingest/README.md](ingest/README.md#running-it-somewhere-reachable),
-because a container's `-p 8000:8000` makes it reachable from wherever the host
-is reachable from, not just from you.
-
 ## Connecting to the graph
 
 The database is bound to `127.0.0.1`, so it is unreachable over the network by
@@ -173,8 +142,8 @@ connect.
 
 Closing the tunnel stops nothing — it closes your view, not the database.
 
-**If the tunnel will not bind**, something local holds those ports: a Docker
-Neo4j, or an older tunnel of your own. Identify it before assuming — `netstat
+**If the tunnel will not bind**, something local holds those ports: a Neo4j
+running on your own machine, or an older tunnel. Identify it before assuming — `netstat
 -ano | findstr "7474 7687"` on Windows, `ss -ltnp | grep -E ':(7474|7687)'`
 elsewhere. Then either stop it, or use different local ports:
 
