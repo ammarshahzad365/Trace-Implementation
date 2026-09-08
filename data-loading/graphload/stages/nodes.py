@@ -76,7 +76,11 @@ def run(ctx: Context, handle: Session | None) -> dict:
             save_cached(ctx.settings.cache_dir, spec, ctx.repo_root, entries)
 
         by_label = dict(sorted(writer.per_name.items(), key=lambda kv: -kv[1]))
-        per_source[spec.key] = {"nodes": writer.result.rows, "by_label": by_label}
+        per_source[spec.key] = {
+            "nodes": writer.result.rows,
+            "batches": writer.result.batches,
+            "by_label": by_label,
+        }
         ctx.log(f"  {spec.label:14} {writer.result.rows:>9,} nodes across {len(by_label)} label(s)")
 
     ctx.sync_duplicates()

@@ -103,6 +103,7 @@ def load(ctx: Context, handle: Session | None, *, accept: Route, stage_name: str
     )
     return {
         "rows": writer.result.rows,
+        "batches": writer.result.batches,
         "by_type": by_type,
         "by_source": per_source,
         "dangling_seen": dangling,

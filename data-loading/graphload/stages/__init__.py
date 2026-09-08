@@ -19,8 +19,8 @@ from __future__ import annotations
 
 from . import bridges, constraints, edges, nodes, verify
 
-ORDER = ("constraints", "nodes", "edges", "bridges", "verify")
-
+# Declared once, in dependency order. `ORDER` is derived rather than repeated
+# so the two cannot drift apart -- a dict preserves insertion order.
 MODULES = {
     "constraints": constraints,
     "nodes": nodes,
@@ -28,3 +28,5 @@ MODULES = {
     "bridges": bridges,
     "verify": verify,
 }
+
+ORDER = tuple(MODULES)

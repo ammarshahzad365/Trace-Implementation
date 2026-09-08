@@ -41,11 +41,6 @@ class WriteResult:
     batches: int = 0
     rows: int = 0
 
-    def __iadd__(self, other: "WriteResult") -> "WriteResult":
-        self.batches += other.batches
-        self.rows += other.rows
-        return self
-
 
 def chunked(rows: Iterable[Mapping[str, object]], size: int) -> Iterator[list[Mapping[str, object]]]:
     batch: list[Mapping[str, object]] = []

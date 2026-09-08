@@ -40,16 +40,6 @@ class Context:
     registry: Registry = field(default_factory=Registry)
     covered_sources: set[str] = field(default_factory=set)
 
-    @property
-    def selected_keys(self) -> set[str]:
-        return {spec.key for spec in self.selected_specs}
-
-    def spec(self, key: str) -> SourceSpec:
-        for candidate in self.all_specs:
-            if candidate.key == key:
-                return candidate
-        raise KeyError(key)
-
     def sync_duplicates(self) -> None:
         """Surface the registry's duplicate ids as a findings gate."""
         self.findings.duplicate_ids = list(self.registry.duplicates)

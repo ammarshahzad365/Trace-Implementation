@@ -15,11 +15,10 @@ traced to a documented field in a source's README.
 from __future__ import annotations
 
 from .labels import LABELS, REL_TYPE_OVERRIDES, all_labels
-from .sources import BY_KEY, SOURCES
+from .sources import SOURCES
 
 __all__ = [
     "SOURCES",
-    "BY_KEY",
     "LABELS",
     "REL_TYPE_OVERRIDES",
     "all_labels",

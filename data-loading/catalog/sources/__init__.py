@@ -23,5 +23,3 @@ SOURCES: tuple[SourceSpec, ...] = (
     mitre_defend.SPEC,
     cve.SPEC,
 )
-
-BY_KEY = {spec.key: spec for spec in SOURCES}

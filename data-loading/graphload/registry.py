@@ -29,7 +29,7 @@ from __future__ import annotations
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Iterable, Sequence
 
 from .spec import SourceSpec
 
@@ -75,19 +75,8 @@ class Registry:
         index = self._ids.get(entity_id)
         return None if index is None else self._pairs[index]
 
-    def label_of(self, entity_id: str) -> str | None:
-        pair = self.lookup(entity_id)
-        return None if pair is None else pair[0]
-
     def __len__(self) -> int:
         return len(self._ids)
-
-    def counts_by_label(self) -> dict[str, int]:
-        out: dict[str, int] = {}
-        for index in self._ids.values():
-            label = self._pairs[index][0]
-            out[label] = out.get(label, 0) + 1
-        return out
 
     def labels(self) -> set[str]:
         return {label for label, _ in self._pairs}
@@ -140,26 +129,3 @@ def save_cached(
             handle,
             protocol=pickle.HIGHEST_PROTOCOL,
         )
-
-
-def build(
-    specs: Sequence[SourceSpec],
-    repo_root: Path,
-    cache_dir: Path,
-    scan: Callable[[SourceSpec], list[tuple[str, str]]],
-    *,
-    use_cache: bool = True,
-    on_progress: Callable[[str, int, bool], None] | None = None,
-) -> Registry:
-    registry = Registry()
-    for spec in specs:
-        entries = load_cached(cache_dir, spec, repo_root) if use_cache else None
-        cached = entries is not None
-        if entries is None:
-            entries = scan(spec)
-            if use_cache:
-                save_cached(cache_dir, spec, repo_root, entries)
-        registry.extend(entries, spec.key)
-        if on_progress:
-            on_progress(spec.key, len(entries), cached)
-    return registry
