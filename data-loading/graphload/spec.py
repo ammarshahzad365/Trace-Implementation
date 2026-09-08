@@ -6,25 +6,20 @@ cybersecurity generally. What it knows is:
 - an **entity file** holds records that each have an id and a type, and
 - an **edge file** holds rows that each have a type and two endpoint ids.
 
-Which fields carry those things is not assumed -- it is declared, via
-`RecordShape`/`EdgeShape`. The defaults match what `data-preprocessing/` emits
-(`id`, `type`, `relationship_type`, `source_ref`, `target_ref`), so `catalog/`
-never has to spell them out; a future dataset that calls them
-`uuid`/`kind`/`from`/`to` passes a different shape rather than needing a
-different loader.
+Which fields carry those things is not assumed -- it is declared once, here, by
+`ENTITY_SHAPE` and `EDGE_SHAPE`. They name what `data-preprocessing/` emits
+(`id`, `type`, `relationship_type`, `source_ref`, `target_ref`), so no stage
+hardcodes a field name and a dataset that called them `uuid`/`kind`/`from`/`to`
+would be two constants away rather than a rewrite.
 
 Those declared field names do double duty. They say where to *read* identity
 from, and they are exactly the fields that become graph structure rather than
 properties -- see `properties.py`. Nothing else about a record is interpreted.
-
-`reader` names an entry in `graphload.readers.REGISTRY` -- streaming JSON array
-by default, with JSONL and CSV also available. A new input format is a new
-reader, not a change to any stage.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence, Union
 
@@ -63,13 +58,15 @@ class EdgeShape:
         return (self.type, self.source, self.target, self.kind)
 
 
+ENTITY_SHAPE = RecordShape()
+EDGE_SHAPE = EdgeShape()
+
+
 @dataclass(frozen=True)
 class EntityFile:
     """One file of records that become nodes."""
 
     path: str
-    reader: str = "json_array"
-    shape: RecordShape = field(default_factory=RecordShape)
 
 
 @dataclass(frozen=True)
@@ -77,8 +74,6 @@ class EdgeFile:
     """One file of rows that become relationships."""
 
     path: str
-    reader: str = "json_array"
-    shape: EdgeShape = field(default_factory=EdgeShape)
 
 
 SourceFile = Union[EntityFile, EdgeFile]

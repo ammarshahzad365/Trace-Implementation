@@ -8,7 +8,7 @@ has no idea what they mean.
 
 This is the source that makes streaming non-optional: `entities.json` is 402 MB
 and `relationships.json` 95 MB, both pretty-printed. See
-`graphload/readers/json_array.py`.
+`graphload/reading.py`.
 
 Every one of its 336,339 edge rows points from a CVE at a CWE, so they are all
 classified as cross-source and loaded by the `bridges` stage, not `edges`.

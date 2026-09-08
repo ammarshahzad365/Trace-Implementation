@@ -28,6 +28,7 @@ from ..context import Context
 from ..properties import properties
 from ..reading import iter_records, label_for
 from ..registry import save_cached
+from ..spec import ENTITY_SHAPE
 
 
 def run(ctx: Context, handle: Session | None) -> dict:
@@ -44,10 +45,9 @@ def run(ctx: Context, handle: Session | None) -> dict:
         )
 
         for entity_file in spec.entity_files():
-            shape = entity_file.shape
             for record in iter_records(spec, entity_file, ctx.repo_root, ctx.limit):
-                entity_id = record.get(shape.id)
-                type_value = record.get(shape.type)
+                entity_id = record.get(ENTITY_SHAPE.id)
+                type_value = record.get(ENTITY_SHAPE.type)
                 if not entity_id:
                     ctx.findings.missing_id.append(f"{spec.key}/{entity_file.path}")
                     continue
@@ -62,7 +62,7 @@ def run(ctx: Context, handle: Session | None) -> dict:
                 entity_id = str(entity_id)
                 props = properties(
                     record,
-                    structural=shape.structural,
+                    structural=ENTITY_SHAPE.structural,
                     what=label,
                     record_id=entity_id,
                 )

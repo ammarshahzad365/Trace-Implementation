@@ -26,6 +26,7 @@ from ..naming import to_rel_type
 from ..properties import properties
 from ..reading import iter_records
 from ..router import Route, classify
+from ..spec import EDGE_SHAPE
 
 
 def load(ctx: Context, handle: Session | None, *, accept: Route, stage_name: str) -> dict:
@@ -47,12 +48,11 @@ def load(ctx: Context, handle: Session | None, *, accept: Route, stage_name: str
     for spec in specs:
         source_rows = 0
         for edge_file in spec.edge_files():
-            shape = edge_file.shape
             for row in iter_records(spec, edge_file, ctx.repo_root, ctx.limit):
-                source_id = row.get(shape.source)
-                target_id = row.get(shape.target)
-                raw_type = row.get(shape.type)
-                edge_id = row.get(shape.id)
+                source_id = row.get(EDGE_SHAPE.source)
+                target_id = row.get(EDGE_SHAPE.target)
+                raw_type = row.get(EDGE_SHAPE.type)
+                edge_id = row.get(EDGE_SHAPE.id)
                 if not (source_id and target_id and raw_type and edge_id):
                     ctx.findings.missing_id.append(
                         f"{spec.key}/{edge_file.path}: incomplete edge row"
@@ -82,7 +82,7 @@ def load(ctx: Context, handle: Session | None, *, accept: Route, stage_name: str
                 rel_type = to_rel_type(str(raw_type), ctx.rel_type_overrides)
                 props = properties(
                     row,
-                    structural=shape.structural,
+                    structural=EDGE_SHAPE.structural,
                     what=rel_type,
                     record_id=str(edge_id),
                 )

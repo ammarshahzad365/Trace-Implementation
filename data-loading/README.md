@@ -326,10 +326,14 @@ py main.py --stage bridges                      # wire it to everything else
 That last step is easy to forget: `--only atlas` loads only edges staying inside
 ATLAS, and every link into CWE or ATT&CK is a bridge.
 
-**If the shape differs**, pass a shape —
-`EntityFile("nodes.json", shape=RecordShape(id="uuid", type="kind"))` — or name
-a reader — `EntityFile("data.jsonl", reader="jsonl")`. CSV delivers every value
-as a string and the loader will not guess types from text; that is preprocessing.
+**The input must be a JSON array** of the shape above — one top-level `[...]`,
+records carrying `id`/`type` and rows carrying
+`relationship_type`/`source_ref`/`target_ref`. Those field names are declared in
+one place, `ENTITY_SHAPE`/`EDGE_SHAPE` in
+[`graphload/spec.py`](graphload/spec.py), and a source that spells them
+differently is a change there rather than in any stage. Converting a format the
+loader does not read is `data-preprocessing/`'s job, which is also where a
+guess about what a CSV's text means could be documented.
 
 **What not to add:** there is deliberately nowhere in `catalog/` for a field
 rename, derived value, retyped link or merge rule. If a source needs that, it
