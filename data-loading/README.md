@@ -84,6 +84,7 @@ long descriptions is one large transaction.
 
 **Credentials** come from the repo-root `.env`; a real environment variable
 beats it, so loading elsewhere for one run needs no file edit.
+[`../.env.example`](../.env.example) lists every key.
 
 ```ini
 NEO4J_PASSWORD=...                    # required
@@ -347,6 +348,11 @@ needs it in `data-preprocessing/`.
 - 56,973 nodes are isolated, 56,702 of them CVEs with no CWE mapping. That is
   the data, not the load — worth knowing before reading into coverage numbers.
 - Community edition means one database; `NEO4J_DATABASE` has nowhere else to go.
+- Labels minted by the [ingest API](ingest/README.md) are not in
+  `catalog/labels.py`, so `--stage constraints` will not recreate their
+  constraints against a fresh database. The API creates its own on first use, so
+  this only matters if you rebuild from the files and expect those labels back —
+  the loader never wrote them, and nothing in `data-preprocessing/` produces them.
 
 ## Where to read what
 
@@ -363,6 +369,6 @@ Docs sit next to the code and explain **why**, not what.
 | Why a separate bridges stage? | [`graphload/router.py`](graphload/router.py) |
 | Why constraints first? | [`graphload/schema.py`](graphload/schema.py) |
 | Why `SET n =` not `+=`? | [`graphload/batch.py`](graphload/batch.py) |
-| Why stream the input? | [`graphload/readers/json_array.py`](graphload/readers/json_array.py) |
+| Why stream the input? | [`graphload/reading.py`](graphload/reading.py) |
 | What stops a bad load? | [`graphload/validate.py`](graphload/validate.py) |
 | What do the input files look like? | [`../data-preprocessing/README.md`](../data-preprocessing/README.md) |

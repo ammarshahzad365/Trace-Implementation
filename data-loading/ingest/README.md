@@ -88,23 +88,28 @@ curl -X POST http://localhost:8000/ingest \
   -H "Content-Type: application/json" \
   -d '{
     "entities": [
-      { "id": "CVE-2026-99999", "type": "vulnerability",
+      { "id": "CVE-2026-99999", "type": "vulnerability", "source": "apt-report-2026-114",
         "description": "Example.", "cvss_base_score": 7.5 }
     ],
     "relationships": [
       { "id": "relationship--example-1", "relationship_type": "related_to",
-        "source_ref": "CVE-2026-99999", "target_ref": "CWE-79" }
+        "source_ref": "CVE-2026-99999", "target_ref": "CWE-79",
+        "source": "apt-report-2026-114" }
     ]
   }'
 ```
 
 ```json
 {
-  "entities":      { "written": 1, "by_label": { "Vulnerability": 1 } },
+  "entities":      { "written": 1, "by_label": { "Vulnerability": 1 }, "new_labels": [] },
   "relationships": { "written": 1, "by_type": { "RELATED_TO": 1 },
                      "skipped_dangling": 0, "dangling": [] }
 }
 ```
+
+`source` is required on both — leave it off and the response is a 422 naming the
+record. `new_labels` lists any label this request minted that the five catalogs
+had never used.
 
 ### What a record needs
 
@@ -148,7 +153,11 @@ distinctively (`relationship--`, or a source tag of your own).
 
 **Linking to existing data just means using its id.** `CWE-79`, `T1055`,
 `CVE-2021-44228`. There is nothing to register; the endpoints are looked up by
-id and the relationship is attached.
+id and the relationship is attached. That includes nodes this API added
+earlier under a type the catalogs have never used — endpoints are resolved
+against every label the database actually has, not against
+[`../catalog/labels.py`](../catalog/labels.py), so a `ThreatActor` posted last
+week is as findable as a CWE.
 
 **Re-posting replaces, it does not patch.** Properties are written with
 `SET n = props`, so a field you leave out of a later post is *removed* from the
@@ -163,6 +172,13 @@ label (`threat-actor` -> `ThreatActor`), because this endpoint exists
 specifically to take in entities that an unstructured extraction pass names for
 the first time. `known_entity_types` in `GET /schema` is a reference for what
 the five structured catalogs already use, not a gate on what you can post.
+
+The one thing a `type` has to be is *usable*. A label is interpolated into the
+Cypher rather than sent as a parameter, so it must derive a bare identifier —
+letters, digits and underscores, starting with a letter. `threat-actor` and
+`Threat Actor` are both fine; `` a`b `` is a 422. The same applies to
+`relationship_type`, and a bad one refuses the whole request rather than
+failing halfway through it.
 
 ## Running it somewhere reachable
 
@@ -206,7 +222,7 @@ starting the API against it means writing anything.
 
 | Status | Means |
 |---|---|
-| `422` | The request is malformed: a missing required field (`id`, `type`/`relationship_type`, `source`, or an endpoint ref), or a value Neo4j cannot store (a nested object or list of lists). The message names the record and field. |
+| `422` | The request is malformed: a missing required field (`id`, `type`/`relationship_type`, `source`, or an endpoint ref), a value Neo4j cannot store (a nested object or list of lists), or a `type`/`relationship_type` that does not derive a bare identifier. The message names the record and field. |
 | `400` | Nothing to do — both lists empty. |
 | `503` | Neo4j is not reachable from the API. Check `~/opt/neo4j/bin/neo4j status` on the server. |
 

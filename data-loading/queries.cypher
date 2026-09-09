@@ -67,9 +67,15 @@ RETURN w.id, w.name, count(v) AS cves ORDER BY cves DESC LIMIT 20;
 MATCH (t:AttackTechnique) WHERE NOT (t)<-[:COUNTERS]-(:DefensiveTechnique)
 RETURN t.id, t.name ORDER BY t.id LIMIT 50;
 
-// Which groups use a given technique, and what malware they use it through.
-MATCH (g:IntrusionSet)-[:USES]->(t:AttackTechnique {id: 'T1055'})
+// Which groups use a given technique directly.
+MATCH (g:IntrusionSet)-[:USES]->(:AttackTechnique {id: 'T1055'})
 RETURN g.id, g.name ORDER BY g.id;
+
+// And which reach it through malware instead -- the same USES type, two hops.
+// Worth running beside the query above: a group can appear in one and not the
+// other, because ATT&CK states the two attributions separately.
+MATCH (g:IntrusionSet)-[:USES]->(m:Malware)-[:USES]->(:AttackTechnique {id: 'T1055'})
+RETURN g.name AS group, collect(DISTINCT m.name) AS via ORDER BY group;
 
 // Mitigations for a weakness, as CWE states them.
 MATCH (w:Weakness {id: 'CWE-79'})-[:HAS_MITIGATION]->(m:Mitigation)

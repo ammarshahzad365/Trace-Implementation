@@ -1,32 +1,37 @@
 # Trace-Implementation
 
 This project pulls five public cyber-security catalogs from the internet, cleans
-them up, and turns them into one connected set of entity and relationship files -
-a knowledge graph in JSON form.
+them up, turns them into one connected set of entity and relationship files, and
+loads that into Neo4j as a single queryable knowledge graph.
 
-## The two stages
+## The three stages
 
 | Stage | Folder | What it does |
 |---|---|---|
 | **1. Get the data** | [`data-acquisition/`](data-acquisition/) | Downloads CVE, CWE, CAPEC, ATT&CK and D3FEND and saves a local copy you can re-check and diff |
 | **2. Clean the data** | [`data-preprocessing/`](data-preprocessing/) | Turns each source into flat JSON: one entity file and one relationship file per source |
+| **3. Load the graph** | [`data-loading/`](data-loading/) | Streams those ten files into Neo4j — 372,739 nodes and 393,418 relationships — and serves an HTTP API for records that arrive later |
 
 Each stage only reads the stage before it, so you can re-run any one of them on
 its own.
 
 ## Running it
 
-You need Python 3.12 or newer.
+You need Python 3.12 or newer. Stage 3 also needs a Neo4j 5.x server; see
+[`data-loading/README.md`](data-loading/README.md#starting-a-database).
 
 ### 1. Credentials
 
 Make a `.env` file in this folder. It is gitignored, so nothing in it reaches
-git:
+git — [`.env.example`](.env.example) lists every key with its default:
 
 ```ini
 # Only needed for stage 1. Free key: https://nvd.nist.gov/developers/request-an-api-key
 # Without a key NVD allows 5 requests per 30s instead of 50 - about 10x slower.
 NVD_API_KEY=<your key>
+
+# Needed for stage 3.
+NEO4J_PASSWORD=<your password>
 ```
 
 ### 2. Download the raw data
@@ -57,11 +62,28 @@ and links are kept apart, and re-runs are byte-identical.
 rules and the shared text cleanup; each source folder has its own README saying
 why each field was kept, renamed or dropped.
 
+### 4. Load it into Neo4j
+
+```bash
+cd data-loading
+py -m pip install -r requirements.txt
+py main.py --dry-run            # validate the files; needs no database
+py main.py --check              # confirm Python can reach the database
+py main.py                      # load, about two minutes
+```
+
+You run this once — Neo4j keeps the graph on disk, so it survives restarts.
+[`data-loading/README.md`](data-loading/README.md) covers starting a database,
+connecting through an SSH tunnel, and [`queries.cypher`](data-loading/queries.cypher)
+has a starter set including the CVE → CWE → CAPEC → ATT&CK → D3FEND traversal
+this project exists for.
+
 ### Keeping it up to date
 
 ```bash
 cd data-acquisition      && py -m incremental_crawler   # fetch what changed
 cd ../data-preprocessing && py main.py                  # clean it again
+cd ../data-loading       && py main.py                  # load it again
 ```
 
 ## The five sources
@@ -69,10 +91,15 @@ cd ../data-preprocessing && py main.py                  # clean it again
 | Source | What it adds | Entities | Links | Comes from |
 |---|---|---|---|---|
 | **CVE** (NVD) | Real, specific vulnerabilities, plus their severity scores | 359,355 | 336,339 | NVD REST API 2.0 |
-| **MITRE ATT&CK** | What attackers do: techniques, malware, groups, detections | 5,659 | 33,181 | TAXII 2.1 |
-| **CWE** | Kinds of software weakness, and how to fix them | 5,040 | 16,941 | Versioned XML catalog |
-| **CAPEC** | Attack patterns: how a weakness gets abused | 1,492 | 3,367 | Pre-built STIX bundle |
-| **MITRE D3FEND** | Defences, and what each one counters | 1,193 | 6,471 | D3FEND REST API |
+| **MITRE ATT&CK** | What attackers do: techniques, malware, groups, detections | 5,659 | 33,105 | TAXII 2.1 |
+| **CWE** | Kinds of software weakness, and how to fix them | 5,040 | 16,767 | Versioned XML catalog |
+| **CAPEC** | Attack patterns: how a weakness gets abused | 1,492 | 2,155 | Pre-built STIX bundle |
+| **MITRE D3FEND** | Defences, and what each one counters | 1,193 | 5,056 | D3FEND REST API |
+
+Counted from the `relationships.json` each source produces. The graph holds
+fewer relationships than the column totals (393,418 against 393,422): a handful
+of edges name an endpoint no catalog publishes — CWE citing CVEs NVD rejected —
+and those are reported and skipped rather than invented.
 
 
 
@@ -80,6 +107,7 @@ cd ../data-preprocessing && py main.py                  # clean it again
 
 ```
 .env                     credentials, gitignored
+.env.example             every key it can hold, with defaults
 README.md                you are here
 
 data-acquisition/        stage 1 - five crawlers plus one runner for all of them
@@ -91,6 +119,14 @@ data-preprocessing/      stage 2 - five cleaners plus one runner
   main.py                runs all five
   <SOURCE>/              <source>_preprocessing.py, entities.json,
                          relationships.json, README.md
+
+data-loading/            stage 3 - the ten files become one Neo4j graph
+  README.md              running it, connecting to the graph, adding a source
+  main.py                the batch loader, five stages
+  graphload/             the engine: reads records, names them, writes them
+  catalog/               this dataset as declarations - five specs, two name maps
+  ingest/                HTTP API for records that arrive after the load
+  queries.cypher         starter queries, including the full CVE-to-D3FEND path
 ```
 
 Everything the code generates is gitignored (`*.json`). Those files are derived
@@ -108,3 +144,5 @@ rather than repeating what the code does.
 | What does the raw downloaded data look like? | [`data-acquisition/DATA_STORAGE_REPORT.md`](data-acquisition/DATA_STORAGE_REPORT.md) |
 | How does one crawler work? | that source's `data-acquisition/<SOURCE>/README.md` |
 | Why was this field dropped, renamed or split out? | that source's `data-preprocessing/<SOURCE>/README.md` |
+| How do I start Neo4j, connect to it, or query the graph? | [`data-loading/README.md`](data-loading/README.md) |
+| How do I add records after the load? | [`data-loading/ingest/README.md`](data-loading/ingest/README.md) |
