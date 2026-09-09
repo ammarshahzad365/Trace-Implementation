@@ -206,25 +206,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         for name in to_run:
             print(f"\n=== {name} ===")
             started = time.monotonic()
+            # Every way a stage can stop the run ends up in `failures` rather
+            # than propagating, so the warnings, the summary and the report
+            # below still happen. A gate firing halfway through a load is
+            # exactly when knowing what did get written is worth most.
             try:
                 results[name] = stages.MODULES[name].run(ctx, handle)
-            except SystemExit:
-                raise
+                timings[name] = time.monotonic() - started
+
+                # Gate after every stage that read records, so a bad dataset
+                # stops before the next stage compounds it. Note this is after
+                # the write, not before: catching a duplicate id without reading
+                # every record first is impossible, and reading everything twice
+                # would double the slowest part of the load. `--dry-run` is the
+                # pass that catches it with nothing written at all.
+                if name in ("nodes", "edges", "bridges"):
+                    raise_if_fatal(ctx.findings, ctx.allow_new_labels)
+            except SystemExit as exc:
+                failures.append(f"{name}: {exc}")
+                timings.setdefault(name, time.monotonic() - started)
+                print(f"  {exc}")
+                break
             except Exception as exc:  # noqa: BLE001 -- report which stage, then stop
                 failures.append(f"{name}: {type(exc).__name__}: {exc}")
                 timings[name] = time.monotonic() - started
                 print(f"  FAILED: {type(exc).__name__}: {exc}")
                 break
-            timings[name] = time.monotonic() - started
-
-            # Gate after every stage that read records, so a bad dataset stops
-            # before the next stage compounds it. Note this is after the write,
-            # not before: catching a duplicate id without reading every record
-            # first is impossible, and reading everything twice would double the
-            # slowest part of the load. `--dry-run` is the pass that catches it
-            # with nothing written at all.
-            if name in ("nodes", "edges", "bridges"):
-                raise_if_fatal(ctx.findings, ctx.allow_new_labels)
     finally:
         if handle is not None:
             handle.__exit__(None, None, None)
@@ -243,12 +250,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             status = "FAILED" if any(f.startswith(name + ":") for f in failures) else "OK"
             print(f"  {status:6} {name:12} {timings[name]:7.1f}s")
     print(f"  {'total':19} {sum(timings.values()):7.1f}s")
+    if failures:
+        print(f"  {len(failures)} failure(s); stages after the first were not run")
 
     path = report.write(
         ctx.settings.cache_dir / "load_report.json",
         stages=results,
         timings=timings,
         warnings=warnings,
+        failures=failures,
         settings_summary=ctx.settings.redacted,
         dry_run=ctx.dry_run,
     )

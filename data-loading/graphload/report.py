@@ -22,6 +22,7 @@ def write(
     stages: Mapping[str, object],
     timings: Mapping[str, float],
     warnings: list[str],
+    failures: list[str],
     settings_summary: str,
     dry_run: bool,
 ) -> Path:
@@ -32,6 +33,8 @@ def write(
         "platform": platform.platform(),
         "target": settings_summary,
         "dry_run": dry_run,
+        "ok": not failures,
+        "failures": failures,
         "timings_seconds": {k: round(v, 1) for k, v in timings.items()},
         "warnings": warnings,
         "stages": stages,

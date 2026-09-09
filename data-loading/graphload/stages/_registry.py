@@ -8,6 +8,11 @@ scanned if the cache is missing or stale.
 This is why the cache is per source rather than one file: `--stage bridges`
 resolves every id in the graph in a couple of seconds instead of re-streaming
 402 MB of CVE JSON.
+
+A scan here honours `--limit` too. Without that, `--limit 500 --only capec`
+reads 500 CAPEC records and then streams all 402 MB anyway to fill in the four
+sources it skipped, which is the opposite of what the flag is for. The cost is
+more dangling endpoints, which `--limit` already warns about.
 """
 
 from __future__ import annotations
@@ -27,8 +32,12 @@ def ensure(ctx: Context) -> dict:
         )
         if entries is None:
             ctx.log(f"  scanning {spec.label} (no usable cache)")
-            entries = scan_entities(spec, ctx.repo_root, ctx.label_overrides, ctx.findings)
-            if ctx.use_cache:
+            entries = scan_entities(
+                spec, ctx.repo_root, ctx.label_overrides, ctx.findings, limit=ctx.limit
+            )
+            # A limited scan is a partial registry, so caching it would poison
+            # the next full run -- same reason `nodes` skips the save.
+            if ctx.use_cache and ctx.limit is None:
                 save_cached(ctx.settings.cache_dir, spec, ctx.repo_root, entries)
             scanned.append(spec.key)
         else:
