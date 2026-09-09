@@ -27,6 +27,10 @@ required are the fields the graph itself cannot do without (see `Entity` and
 under those names, exactly as in `graphload/properties.py`. It is the same
 contract as the files under `data-preprocessing/`, which means anything valid
 there is valid here, and vice versa.
+
+The one thing a `type` must be is *usable*: it has to derive a label that is a
+bare Cypher identifier, because labels are interpolated into queries rather
+than parameterised. `threat-actor` is fine, ``a`b`` is a 422.
 """
 
 from __future__ import annotations
@@ -92,7 +96,11 @@ class Entity(BaseModel):
 
     model_config = ConfigDict(extra="allow")
     id: str = Field(examples=["CVE-2026-99999"])
-    type: str = Field(examples=["vulnerability"], description="Any value; unrecognised types derive their own label.")
+    type: str = Field(
+        examples=["vulnerability"],
+        description="Any value that derives a bare identifier; unrecognised types "
+                    "derive their own label.",
+    )
     source: str = Field(
         description="Who or what asserted this record -- a catalog name or a document id.",
         examples=["apt-report-2026-114"],
@@ -134,9 +142,42 @@ async def lifespan(app: FastAPI):
     with driver.session(database=cfg.database) as handle:
         create_constraints(handle, catalog.all_labels())
         await_indexes(handle)
+        # Every label in the store was put there by this code or by the batch
+        # loader, and both create a constraint first -- so a label that already
+        # exists needs no DDL, whether or not the catalog declares it. Seeding
+        # from the database is what keeps a restart from re-running
+        # `awaitIndexes` for labels earlier requests already minted.
+        STATE["ensured_labels"] = set(catalog.all_labels()) | _db_labels(handle)
     STATE["driver"], STATE["cfg"] = driver, cfg
+    STATE["label_candidates"] = None
     yield
     driver.close()
+
+
+def _db_labels(handle) -> set[str]:
+    return {row["label"] for row in handle.run("CALL db.labels() YIELD label RETURN label")}
+
+
+def label_candidates(handle) -> list[str]:
+    """Labels to try when resolving a relationship endpoint, likeliest first.
+
+    This has to come from the database, not from `catalog/`. The whole point of
+    this endpoint is minting labels the catalog has never heard of, so a list
+    built from `catalog.all_labels()` alone would report a `ThreatActor` node
+    posted an hour ago as a dangling endpoint -- the node is there, nothing
+    looked for it under that label.
+
+    The catalog's 25 go first because they are almost always the answer:
+    `resolve_labels` stops as soon as every id is placed. Cached, and cleared
+    whenever a request mints a new label.
+    """
+    cached = STATE.get("label_candidates")
+    if cached is not None:
+        return cached
+    declared = catalog.all_labels()
+    candidates = declared + sorted(_db_labels(handle) - set(declared))
+    STATE["label_candidates"] = candidates
+    return candidates
 
 
 app = FastAPI(
@@ -206,7 +247,6 @@ def ingest(request: IngestRequest) -> dict:
     if not request.entities and not request.relationships:
         raise HTTPException(400, "Nothing to do: both 'entities' and 'relationships' are empty.")
 
-    declared = catalog.all_labels()
     try:
         with _session() as handle:
             entity_result = (
@@ -214,17 +254,21 @@ def ingest(request: IngestRequest) -> dict:
                     handle,
                     [e.model_dump() for e in request.entities],
                     label_overrides=catalog.LABELS,
-                    declared_labels=declared,
+                    ensured_labels=STATE["ensured_labels"],
                 )
                 if request.entities
-                else {"written": 0, "by_label": {}}
+                else {"written": 0, "by_label": {}, "new_labels": []}
             )
+            # A minted label makes the cached candidate list stale, and the
+            # relationships below may well point at the nodes that minted it.
+            if entity_result["new_labels"]:
+                STATE["label_candidates"] = None
             rel_result = (
                 write_relationships(
                     handle,
                     [r.model_dump() for r in request.relationships],
                     rel_type_overrides=catalog.REL_TYPE_OVERRIDES,
-                    declared_labels=sorted(set(declared) | set(entity_result["by_label"])),
+                    candidate_labels=label_candidates(handle),
                 )
                 if request.relationships
                 else {"written": 0, "by_type": {}, "skipped_dangling": 0, "dangling": []}
