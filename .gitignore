@@ -1,7 +1,13 @@
 .env
 *.json
 __pycache__/
+*.txt
+# ...except the per-stage dependency lists, which a fresh clone needs.
+!requirements.txt
 .claude/
 # data-loading/ working files: the id->label registry cache (rebuilt from the
 # preprocessed output, which is itself gitignored above) and the load report.
 data-loading/.cache/
+# data-extraction/ working files: finished job proposals, kept on disk so a
+# result survives an API restart. Derived from documents, so regenerable.
+data-extraction/.cache/

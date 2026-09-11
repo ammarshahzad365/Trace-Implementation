@@ -1,0 +1,8 @@
+# The extraction stage. Ollama is reached over plain HTTP with urllib, so there
+# is no client library here and no torch -- embeddings come from the same server
+# the extractor runs on.
+neo4j>=5.28,<7
+fastapi>=0.110
+uvicorn>=0.27
+# File uploads on POST /extract/file need multipart parsing.
+python-multipart>=0.0.9
