@@ -261,3 +261,10 @@ Or count what exists: `GET /health` before and after.
 
 If the API itself does not answer, check the tunnel forwards port 8000, then
 that the process is up on the server (`pgrep -f '[i]ngest.serve'`).
+
+## Unstructured text
+
+This API takes records that already have a shape. For a report, an advisory or
+a paper -- prose that has to be read before it has entities in it -- see
+[`data-extraction/`](../../data-extraction/README.md), which extracts with a
+local LLM and commits through this endpoint.

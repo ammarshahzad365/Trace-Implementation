@@ -1,19 +1,22 @@
 # Trace-Implementation
 
 This project pulls five public cyber-security catalogs from the internet, cleans
-them up, turns them into one connected set of entity and relationship files, and
-loads that into Neo4j as a single queryable knowledge graph.
+them up, turns them into one connected set of entity and relationship files,
+loads that into Neo4j as a single queryable knowledge graph — and then grows the
+graph from prose, using a local LLM to read APT reports, advisories and papers
+the way the TRACE paper describes.
 
-## The three stages
+## The four stages
 
 | Stage | Folder | What it does |
 |---|---|---|
 | **1. Get the data** | [`data-acquisition/`](data-acquisition/) | Downloads CVE, CWE, CAPEC, ATT&CK and D3FEND and saves a local copy you can re-check and diff |
 | **2. Clean the data** | [`data-preprocessing/`](data-preprocessing/) | Turns each source into flat JSON: one entity file and one relationship file per source |
 | **3. Load the graph** | [`data-loading/`](data-loading/) | Streams those ten files into Neo4j — 372,739 nodes and 393,418 relationships — and serves an HTTP API for records that arrive later |
+| **4. Read the prose** | [`data-extraction/`](data-extraction/) | Posts an unstructured document to a local LLM, extracts entities and relations, aligns them with what the graph already knows, and writes through stage 3's API |
 
 Each stage only reads the stage before it, so you can re-run any one of them on
-its own.
+its own. Stages talk through files and HTTP, never imports.
 
 ## Running it
 
@@ -78,6 +81,21 @@ connecting through an SSH tunnel, and [`queries.cypher`](data-loading/queries.cy
 has a starter set including the CVE → CWE → CAPEC → ATT&CK → D3FEND traversal
 this project exists for.
 
+### 5. Extract from unstructured text
+
+```bash
+cd data-extraction
+py -m pip install -r requirements.txt
+py -m extract.embed_corpus          # once: index existing nodes for alignment
+py -m extract.serve                 # http://127.0.0.1:8100/docs
+```
+
+Needs Ollama running locally with the extractor and embedder pulled. POST a
+report, poll the job, review what it proposes, commit. Every merge decision and
+every edge's justifying sentence is shown before anything is written.
+[`data-extraction/README.md`](data-extraction/README.md) has the walkthrough and
+the measurements behind the model and threshold choices.
+
 ### Keeping it up to date
 
 ```bash
@@ -127,6 +145,11 @@ data-loading/            stage 3 - the ten files become one Neo4j graph
   catalog/               this dataset as declarations - five specs, two name maps
   ingest/                HTTP API for records that arrive after the load
   queries.cypher         starter queries, including the full CVE-to-D3FEND path
+
+data-extraction/         stage 4 - prose becomes records, through a local LLM
+  README.md              running it, reviewing a proposal, what was measured
+  extract/               the pipeline: ontology, prompts, alignment, jobs, API
+  extract/eval/          the threshold calibration and its gold set
 ```
 
 Everything the code generates is gitignored (`*.json`). Those files are derived
@@ -146,3 +169,5 @@ rather than repeating what the code does.
 | Why was this field dropped, renamed or split out? | that source's `data-preprocessing/<SOURCE>/README.md` |
 | How do I start Neo4j, connect to it, or query the graph? | [`data-loading/README.md`](data-loading/README.md) |
 | How do I add records after the load? | [`data-loading/ingest/README.md`](data-loading/ingest/README.md) |
+| How do I extract records from a report or paper? | [`data-extraction/README.md`](data-extraction/README.md) |
+| Which entity and relation types can the LLM produce, and why those? | [`data-extraction/extract/ontology.py`](data-extraction/extract/ontology.py) |
