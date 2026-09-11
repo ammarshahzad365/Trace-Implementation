@@ -1,0 +1,41 @@
+# Alignment gold set. One entity per line, written the way the extractor
+# paraphrases things (one sentence, from a report's wording) -- NOT copied from
+# ATT&CK, or the test would be measuring string overlap.
+# expected_id verified against the live graph on 2026-09-10.
+# expected_id null = genuinely new; nothing in the graph should match.
+#
+# --- groups (the paper's hardest type, section 5.2.2) ---
+{"type": "group", "name": "Hafnium", "description": "State-sponsored group attributed to intrusions against on-premises Exchange Server deployments", "expected_id": "G0125"}
+{"type": "group", "name": "ToddyCat", "description": "Threat actor reported to have targeted the same Exchange vulnerability with a rootkit", "expected_id": "G1022"}
+{"type": "group", "name": "APT41", "description": "Chinese threat group conducting both espionage and financially motivated operations", "expected_id": "G0096"}
+{"type": "group", "name": "Lazarus", "description": "North Korean actor behind the attacks on the financial sector and cryptocurrency exchanges", "expected_id": "G0032"}
+{"type": "group", "name": "Cozy Bear", "description": "Russian intelligence-linked group responsible for the SolarWinds supply chain compromise", "expected_id": "G0016"}
+{"type": "group", "name": "Sandworm", "description": "Russian military unit behind destructive attacks on Ukrainian power infrastructure", "expected_id": "G0034"}
+{"type": "group", "name": "FIN7", "description": "Financially motivated group targeting retail and hospitality point-of-sale systems", "expected_id": "G0046"}
+{"type": "group", "name": "Volt Typhoon", "description": "PRC state actor pre-positioning in US critical infrastructure using living-off-the-land techniques", "expected_id": "G1017"}
+{"type": "group", "name": "Gamaredon", "description": "Russian espionage group conducting persistent phishing campaigns against Ukrainian government targets", "expected_id": "G0047"}
+{"type": "group", "name": "Turla", "description": "Long-running Russian espionage actor known for satellite-based command and control", "expected_id": "G0010"}
+{"type": "group", "name": "Kimsuky", "description": "North Korean group targeting think tanks and policy experts with spear-phishing", "expected_id": "G0094"}
+{"type": "group", "name": "Winnti Group", "description": "Chinese actor conducting supply-chain compromises of game and software vendors", "expected_id": "G0044"}
+#
+# --- tools and malware (one paper type, two ATT&CK labels) ---
+{"type": "tool", "name": "China Chopper", "description": "Web shell deployed to maintain persistent access to compromised servers", "expected_id": "S0020"}
+{"type": "tool", "name": "Cobalt Strike", "description": "Commercial red-team framework abused for command and control after initial access", "expected_id": "S0154"}
+{"type": "tool", "name": "Mimikatz", "description": "Used to dump plaintext credentials and hashes from memory", "expected_id": "S0002"}
+{"type": "tool", "name": "PlugX", "description": "Remote access trojan with plugin architecture used for espionage", "expected_id": "S0013"}
+{"type": "tool", "name": "ShadowPad", "description": "Modular backdoor delivered through a compromised software update", "expected_id": "S0596"}
+{"type": "tool", "name": "Emotet", "description": "Banking trojan turned loader that delivers other malware families", "expected_id": "S0367"}
+{"type": "tool", "name": "TrickBot", "description": "Modular trojan used for credential theft and as a delivery vehicle for ransomware", "expected_id": "S0266"}
+{"type": "tool", "name": "PsExec", "description": "Sysinternals utility used to execute commands on remote hosts during lateral movement", "expected_id": "S0029"}
+{"type": "tool", "name": "Impacket", "description": "Python toolkit used for SMB and Kerberos attacks during lateral movement", "expected_id": "S0357"}
+{"type": "tool", "name": "Ryuk", "description": "Ransomware deployed manually after network compromise to encrypt enterprise systems", "expected_id": "S0446"}
+{"type": "tool", "name": "ALPHV", "description": "Rust-based ransomware offered as a service and used in double-extortion attacks", "expected_id": "S1068"}
+#
+# --- genuinely new: nothing in the graph should match these ---
+{"type": "tool", "name": "OrpaCrab", "description": "Backdoor abusing the MQTT protocol for command and control against fuel management systems", "expected_id": null}
+{"type": "tool", "name": "GhostEmperor", "description": "Rootkit used by ToddyCat to target Exchange servers", "expected_id": null}
+{"type": "tool", "name": "Procdump", "description": "Used to dump LSASS process memory and harvest credentials", "expected_id": null}
+{"type": "tool", "name": "7-Zip", "description": "Used to compress stolen mailbox data before exfiltration", "expected_id": null}
+{"type": "group", "name": "Silent Lynx", "description": "Previously unreported actor targeting Central Asian government finance ministries", "expected_id": null}
+{"type": "group", "name": "UNC5221", "description": "Suspected China-nexus cluster exploiting Ivanti Connect Secure zero-days", "expected_id": null}
+{"type": "tool", "name": "LockBit", "description": "Ransomware-as-a-service used in high-volume extortion campaigns", "expected_id": null}
