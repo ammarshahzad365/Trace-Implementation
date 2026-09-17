@@ -1,14 +1,22 @@
 """The vocabulary an LLM is allowed to use, and how it maps onto this graph.
 
-TRACE defines a **separate, small** schema for unstructured text rather than
-reusing the structured catalogs' 34 relationship types: entity types tailored per
-genre (section 3.1.1) and a fixed set of triple patterns (section 3.1.2,
-evaluated in Figure 2). This module is that schema, in one place, because three
-different stages need to agree on it -- the extraction prompt offers these types,
-relation validation forms pairs from these patterns, and alignment searches
-within one of these types.
+Two lists live here, and they are closed to different degrees.
 
-## Why the list is closed
+**Entity types** are closed: the types TRACE tailors per genre (section 3.1.1),
+plus `other` as an escape that is reported and never written. The reasons are
+below. **Relation types** are the graph's own vocabulary -- every relationship
+type the structured catalogs loaded, measured on the live graph, plus the seven
+patterns of Figure 2 -- with a proposed new name allowed only when nothing in
+that vocabulary expresses what the text says. New names *are* written. The
+model is told to resolve into an existing type first, and the pipeline records
+which relations came out as new so the cost of the vocabulary is a number in
+every proposal, not a guess.
+
+This module is that schema, in one place, because three stages need to agree
+on it -- the extraction prompt offers these types, relation extraction offers
+these relations, and alignment searches within one of these types.
+
+## Why the entity list is closed
 
 The prompt is limited; `POST /ingest` is not, and stays exactly as open as
 `ingest/serve.py` says it is. The limit exists for three reasons:
@@ -18,14 +26,24 @@ The prompt is limited; `POST /ingest` is not, and stays exactly as open as
    actor arrives as `group`, `threat-actor` and `apt-group` from three reports,
    lands in three separate search spaces, and alignment never fires -- producing
    exactly the duplicates alignment exists to prevent.
-2. **Relation validation needs patterns to form pairs from.** "Combine the nodes
-   based on the predefined relationship schema" is not possible without a schema.
-3. **Per-type F1 needs a closed set.** Table 4's macro-F1 averages F1 per entity
+2. **Per-type F1 needs a closed set.** Table 4's macro-F1 averages F1 per entity
    type; an open set makes the paper's own metric uncomputable.
+3. **Types are where the graph's labels come from.** A type the loader has never
+   seen becomes a label with no index and no existing nodes to join.
 
 `OTHER` is the escape hatch: a model may say "this is something else, and here
 is what I would call it". Those are reported and **not** written, which turns
 "what does the fixed ontology miss?" into a number instead of a worry.
+
+## Why the relation list is the graph's, not just the paper's
+
+The paper's seven patterns (Figure 2) have no `group uses tool`, yet "Volt
+Typhoon uses Mimikatz" is the commonest sentence in an APT report -- and the
+graph already holds 1,159 such edges from ATT&CK (`USES` IntrusionSet -> Tool /
+Malware). Restricting extracted text to seven patterns would make a report say
+less than the catalog it sits next to. So the offered vocabulary is what the
+graph holds, the paper's seven added, and a new name permitted only as a last
+resort -- decided 2026-09-11.
 
 ## The mapping trap
 
@@ -126,18 +144,88 @@ class Pattern(NamedTuple):
     target: str
 
 
-# What each relation means, in the validation prompt's words. The paper leaves
-# them undefined, and an undefined `discovers` got confirmed on the evidence
-# "the group exploited CVE-2021-26855" -- exploiting is not discovering. There is
-# no `exploits` in Figure 2, so the honest answer is a stricter judge, not a
-# looser relation.
-RELATION_DEFINITIONS: dict[str, str] = {
+# What each relation means, in the prompts' words, with the direction. The paper
+# leaves its own undefined, and an undefined `discovers` got confirmed on the
+# evidence "the group exploited CVE-2021-26855" -- exploiting is not discovering.
+#
+# Two groups. `REPORT_RELATIONS` are the ones whose both ends are types the
+# extractor produces: the paper's six names plus the graph's relations between
+# extractable types. These are offered to the model. `CATALOG_RELATIONS` are
+# the rest of what the structured sources loaded: relations between weaknesses,
+# artifacts, analytics, platforms -- node types the extractor never emits, so
+# between extracted entities they can never be right. They were offered at
+# first, with a warning, because the user wanted the whole vocabulary
+# available; measured on a tool-lineage text the model used `has_analytic`
+# three times for tool -> tool (verification rejected all three) and proposed
+# no new name at all. An enum entry that cannot be correct is a distractor, so
+# they are known to the pipeline -- `is_known_relation`, and a proposed name
+# that equals one is that one -- but not offered. The day the entity types
+# grow to include, say, weaknesses, the graph patterns below are where the
+# corresponding relations get promoted. Definitions follow each source's own
+# meaning (CWE, CAPEC, ATT&CK, D3FEND). Measured on the live graph 2026-09-11
+# with `MATCH (a)-[r]->(b) RETURN type(r), labels(a)[0], labels(b)[0]`.
+REPORT_RELATIONS: dict[str, str] = {
+    # The paper's six (seven patterns; `targets` appears twice).
     "discovers": "the technique is how the vulnerability was found or identified (not merely exploited)",
-    "uses": "the technique is carried out with, or by means of, the tool",
+    "uses": "the subject makes use of the object as an instrument: a group uses a tool or a technique; a tool carries out a technique; a technique is performed with a tool. Never for an asset -- a device or system that is attacked or compromised is 'targets'",
     "causes": "the vulnerability leads to compromise, damage or impact on the asset",
     "mitigated_by": "the mitigation reduces, blocks or fixes the vulnerability",
-    "targets": "the technique (or defensive technique) is directed at the asset",
+    "targets": "the technique, defensive technique or group is directed at, attacks or compromises the asset",
     "used_by": "the group exploited or leveraged the vulnerability in its operations",
+    # The graph's, between extractable types.
+    "mitigates": "the mitigation reduces or blocks the attack technique",
+    "counters": "the defensive technique counters or defeats the attack technique",
+    "subtechnique_of": "the technique is a more specific form of the parent technique",
+    "attributed_to": "the activity or campaign is attributed to the group",
+    "detects": "the defensive technique or detection method detects the attack technique",
+}
+
+CATALOG_RELATIONS: dict[str, str] = {
+    # ATT&CK
+    "has_tactic": "the technique serves the tactic (its goal, e.g. initial access, persistence)",
+    "revoked_by": "the catalog entry was retired and replaced by the other (ATT&CK bookkeeping)",
+    "accesses": "the attack technique accesses the artifact (a file, process, credential, network traffic ...)",
+    "creates": "the attack technique creates the artifact",
+    "executes": "the attack technique executes the artifact",
+    "modifies": "the attack technique modifies the artifact",
+    # D3FEND
+    "hardens": "the defensive technique hardens the artifact",
+    "observes": "the defensive technique observes or monitors the artifact",
+    "constrains": "the defensive technique constrains or restricts the artifact",
+    "restores": "the defensive technique restores the artifact",
+    "enables": "the defensive technique enables the defensive tactic",
+    "has_analytic": "the detection strategy is made up of the analytic",
+    "uses_data_component": "the analytic reads the data component (a log, a sensor ...)",
+    "weakness_of": "the weakness is a weakness of the artifact",
+    # CWE / CAPEC
+    "child_of": "the weakness, attack pattern or artifact is a more specific form of the other",
+    "peer_of": "the two weaknesses or attack patterns are peers",
+    "can_precede": "the weakness or attack pattern can come before the other in a chain",
+    "can_also_be": "the weakness can also be classified as the other weakness",
+    "requires": "the weakness requires the other weakness to be present",
+    "starts_with": "the weakness chain starts with the other weakness",
+    "has_consequence": "the weakness leads to the consequence (e.g. denial of service)",
+    "has_detection_method": "the weakness can be found by the detection method",
+    "has_mitigation": "the weakness is reduced by the mitigation",
+    "has_observed_example": "the weakness has the vulnerability as a real observed example",
+    "has_member": "the category or view contains the weakness",
+    "applies_to_platform": "the weakness applies to the platform (a language, OS or technology)",
+}
+
+# Also in the graph and also not offered, for a sharper reason than the
+# catalog ones: NVD's `related_to` *does* sit between an extractable type and
+# a weakness, and it is a cross-reference, not a statement. Offered, it became
+# the fallback for everything -- "shares code with" and "bundled with" both
+# came back as `related_to` -- which is exactly the outcome the `other` route
+# exists to prevent.
+UNOFFERED_RELATIONS: dict[str, str] = {
+    "related_to": "the catalogs' generic cross-reference; never produced from text",
+}
+
+RELATION_DEFINITIONS: dict[str, str] = {
+    **REPORT_RELATIONS,
+    **CATALOG_RELATIONS,
+    **UNOFFERED_RELATIONS,
 }
 
 
@@ -153,6 +241,24 @@ TRIPLE_PATTERNS: tuple[Pattern, ...] = (
     Pattern("vuln", "used_by", "group"),
     Pattern("defend_technique", "targets", "asset"),
 )
+
+# The graph's own patterns between extractable types, as loaded from ATT&CK and
+# D3FEND. Shown to the model as the typical direction of each relation; not
+# enforced, because the user chose an open relation vocabulary and the
+# verification step judges each relation on the text anyway.
+GRAPH_PATTERNS: tuple[Pattern, ...] = (
+    Pattern("group", "uses", "tool"),
+    Pattern("group", "uses", "technique"),
+    Pattern("tool", "uses", "technique"),
+    Pattern("mitigation", "mitigates", "technique"),
+    Pattern("defend_technique", "counters", "technique"),
+    Pattern("technique", "subtechnique_of", "technique"),
+    Pattern("technique", "targets", "asset"),
+)
+
+# A proposed relation name the writer will accept as a Neo4j relationship type
+# once uppercased: snake_case, letters and digits, sensible length.
+_RELATION_NAME = re.compile(r"^[a-z][a-z0-9_]{1,40}$")
 
 # Identifiers that name a node directly, sampled from what `data-preprocessing/`
 # actually emits rather than from the paper: CVE-1999-0001, CWE-5, CAPEC-85,
@@ -200,14 +306,66 @@ def entity_types(genre: str) -> tuple[str, ...]:
 
 
 def patterns_for(genre: str) -> tuple[Pattern, ...]:
-    """Triple patterns whose *both* ends are types this genre extracts.
+    """The paper's and the graph's patterns whose *both* ends this genre extracts.
 
     Derived rather than listed a second time: a pattern naming a type the genre
     never produces could never match anything, and a hand-kept second table is
-    one more thing to fall out of step with `ENTITY_TYPES_BY_GENRE`.
+    one more thing to fall out of step with `ENTITY_TYPES_BY_GENRE`. Shown to
+    the model as the typical direction of each relation.
     """
     allowed = set(entity_types(genre))
-    return tuple(p for p in TRIPLE_PATTERNS if p.source in allowed and p.target in allowed)
+    seen: dict[Pattern, None] = {}
+    for pattern in (*TRIPLE_PATTERNS, *GRAPH_PATTERNS):
+        if pattern.source in allowed and pattern.target in allowed:
+            seen.setdefault(pattern, None)
+    return tuple(seen)
+
+
+def relation_names() -> tuple[str, ...]:
+    """Every relation the model may pick by name -- see `REPORT_RELATIONS`."""
+    return tuple(REPORT_RELATIONS)
+
+
+def orient(source_type: str, relation: str, target_type: str) -> tuple[bool, str]:
+    """Does a known pattern fix this relation's direction and name?
+
+    Returns (swap, relation). The schema, not the model, owns direction:
+    `used_by` is vuln -> group, and a model that returns `APT41 used_by
+    CVE-2021-44228` has the fact right and the arrow wrong (measured once in
+    three test documents). When the reversed pair is a known pattern and the
+    given one is not, swap. Two retypings on top, because the definitions say
+    so and the model did not always listen: `uses` with an asset as object is
+    `targets` ("Volt Typhoon uses Fortinet devices" survived two prompt
+    rules), and `uses` with a vulnerability as object is `used_by` the other
+    way round -- the ProxyLogon test returned both `HAFNIUM uses CVE-…` and
+    `CVE-… used_by HAFNIUM` for one sentence, which is one fact under two
+    names until this folds them.
+    """
+    if relation == "uses" and target_type == "asset":
+        relation = "targets"
+    if relation == "uses" and target_type == "vuln" and source_type == "group":
+        return True, "used_by"
+    patterns = {*TRIPLE_PATTERNS, *GRAPH_PATTERNS}
+    forward = Pattern(source_type, relation, target_type) in patterns
+    backward = Pattern(target_type, relation, source_type) in patterns
+    return (backward and not forward), relation
+
+
+def normalise_relation(name: str) -> str | None:
+    """`Exfiltrates To` -> `exfiltrates_to`; None if nothing usable remains.
+
+    A proposed name reaches Neo4j as a relationship type (uppercased by the
+    writer), so it must be an identifier. Anything else -- an empty string, a
+    sentence, punctuation -- is refused here rather than written as a type
+    nobody will ever query.
+    """
+    cleaned = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
+    cleaned = re.sub(r"_+", "_", cleaned)
+    return cleaned if _RELATION_NAME.match(cleaned) else None
+
+
+def is_known_relation(name: str) -> bool:
+    return name in RELATION_DEFINITIONS
 
 
 def repo_type(paper_type: str) -> str:

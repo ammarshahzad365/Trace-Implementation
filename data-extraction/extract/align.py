@@ -36,6 +36,7 @@ and dates with the four fields a model produced. Only the edges survive.
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Sequence
@@ -131,6 +132,35 @@ def _identifier_hit(candidate: Candidate, known: dict[str, dict]) -> dict | None
     return None
 
 
+# Types whose names are names -- a tool, a group, a CVE, a product -- rather
+# than the model's paraphrase of a behaviour. Name containment is only evidence
+# for these.
+_PROPER_NOUN_TYPES = frozenset({"tool", "group", "vuln", "asset", "mitigation"})
+
+
+def _name_contained(name: str, rows: list[dict]) -> dict | None:
+    """The one retrieved row whose name sits inside `name` as whole words, or
+    whose name contains `name` -- if there is exactly one.
+
+    The contained name must be distinctive -- two words, or seven characters:
+    "Cobalt Strike" and "Mimikatz" qualify, "Proxy" inside "Fast Reverse Proxy"
+    and "RAT" inside "Gh0st RAT" do not, and at that length the false matches
+    win. Two rows qualifying means the qualifier was the distinguishing part
+    ("PowerShell" vs "PowerShell Empire" are two things), so nothing is chosen
+    and the judge decides.
+    """
+    needle = name.strip()
+    hits = []
+    for row in rows:
+        other = (row.get("name") or "").strip()
+        shorter, longer = sorted((needle, other), key=len)
+        if len(shorter) < 7 and len(shorter.split()) < 2:
+            continue
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(shorter)}(?![A-Za-z0-9])", longer, re.I):
+            hits.append(row)
+    return hits[0] if len(hits) == 1 else None
+
+
 def align(
     cfg: Settings,
     handle: Session,
@@ -198,6 +228,40 @@ def align(
                 )
             )
             result.rewrites[minted] = same_name["id"]
+            continue
+
+        # 1c. The exact-name step with a qualifier allowed: "Cobalt Strike
+        # beacon" contains "Cobalt Strike". Exists because the judge once
+        # matched "Cobalt Strike beacon" to ShadowPad on the strength of a
+        # description saying "bundled with ShadowPad" -- and, after the judge
+        # was fixed, the embedding search did not retrieve S0154 at all for
+        # that description. A name the text carries outranks a description the
+        # model wrote. Proper nouns only: a technique's name is the model's
+        # paraphrase, and "Pass-the-credentials" was matched to the technique
+        # named "Credentials" the first time this ran without the restriction.
+        contained = (
+            _name_contained(
+                candidate.name,
+                graph.by_name_overlap(
+                    handle, ontology.align_labels(candidate.paper_type), candidate.name
+                ),
+            )
+            if candidate.paper_type in _PROPER_NOUN_TYPES
+            else None
+        )
+        if contained:
+            result.decisions.append(
+                Decision(
+                    candidate=candidate,
+                    final_id=contained["id"],
+                    matched=True,
+                    method="name",
+                    matched_name=contained["name"],
+                    cosine=1.0,
+                    reason="an existing node's name is contained in the extracted name (or the reverse)",
+                )
+            )
+            result.rewrites[minted] = contained["id"]
             continue
 
         labels = [

@@ -109,7 +109,9 @@ irrelevant ends as `skipped`, which is an outcome, not an error.
                       "why_new": "nothing of this type reached theta=0.55; closest was ..."} ],
   "dropped":       [ {"name": "SN-4471", "why": "isolated, and named only by a serial number"} ],
   "other":         [ {"name": "OrpaCrab", "other_type": "backdoor", "description": "..."} ],
-  "stats":         { ... }
+  "new_relations": [ {"relation": "shares_code_with", "count": 1,
+                      "example": "ShadowPad ... shares a large part of its code base with PlugX"} ],
+  "stats":         { ..., "relation_types": {"uses": 12, "targets": 2} }
 }
 ```
 
@@ -118,7 +120,10 @@ extracted thing *is* that existing node -- with the similarity and the reason.
 A wrong one here points every edge at the wrong entity, which is the failure
 worth ten seconds of your attention. Then `near_misses`: every new entity with
 the closest existing node it did *not* match and the score. If the right answer
-keeps appearing there just under θ, θ is wrong for this embedder.
+keeps appearing there just under θ, θ is wrong for this embedder. Then
+`new_relations`: relation types the graph does not hold yet, which the model
+proposed because none of the existing ones fit. They *are* written on commit;
+this list is where you see them first.
 
 **4. Commit.** Writes through the ingest API. `drop_ids` removes anything you
 rejected; dropping an entity also drops the edges that touched it.
@@ -145,30 +150,78 @@ Each stage names the section of the paper it comes from.
    offered only the genre's types, with worked examples and the identifier hits
    as "what this graph already calls things". Output is schema-constrained, so
    a type outside the ontology cannot be produced.
-5. **Step two -- relations** (§3.2.2). Form every pair the fixed triple patterns
-   allow, among entities that co-occurred in a chunk, and ask the model per
-   batch: *does the text state this?* Each entity is shown with its own
-   extracted description, and the quoted sentence becomes the edge's
-   `evidence` property. Two mechanical checks then apply: the sentence must
-   name each concrete entity (tool, group, CVE, asset), and must lexically
-   overlap the description of each paraphrased one (a technique). Measured on
-   one Volt Typhoon report: 54 of 90 pairs were confirmed before these checks
-   -- nearly every technique paired with every tool in the document -- and 14
-   after, all of them defensible.
+5. **Step two -- relations** (§3.2.2), in two halves. First, per chunk, the
+   model is shown the entities found there and the relation vocabulary (below)
+   and asked which relationships the text states between them, copying an
+   existing relation name where one fits and writing a new snake_case name
+   where none does. Second, every proposed relation goes back to the model in
+   batches of ten: *does the text state this?* Each entity is shown with its
+   own extracted description, and the quoted sentence becomes the edge's
+   `evidence` property. Mechanical checks then apply: the sentence must name
+   each concrete entity (tool, group, CVE, asset) -- or, for the one group in
+   a chunk, refer to it as "the actor", "the group" or "it" -- and must
+   lexically overlap the description of each paraphrased one (a technique).
+   The code also owns direction: a `used_by` returned as group → vuln is
+   turned round, and a `uses` whose object is an asset becomes `targets`.
 6. **Filter** (§3.2.3). Drop nodes that are isolated *and* named only by a
    serial number. Both conditions.
 7. **Standardise** (§3.2.4). Ids minted as `<type>--<uuid5>` from type and
    name, so a re-run lands on the same id. `source` and `collected_at` on
    everything.
 8. **Align** (§3.2.4, §5.2.2). Identifiers match directly; so does an exact
-   name within the same type (`Mimikatz` is S0002, no model needed). Otherwise embed the
-   description, fetch the 20 nearest of the same type, keep those at or above
-   θ, and let the model choose among them or decline. Matches redirect edges to
-   the existing node.
+   name within the same type (`Mimikatz` is S0002, no model needed), and so
+   does a proper-noun name that contains an existing one (`Cobalt Strike
+   beacon` is S0154). Otherwise embed the description, fetch the 20 nearest of
+   the same type, keep those at or above θ, and let the model choose among
+   them or decline. Matches redirect edges to the existing node.
 
-The vocabulary -- entity types per genre, triple patterns, how the paper's names
+The vocabulary -- entity types per genre, relation types, how the paper's names
 map onto this graph's labels -- lives in one file, `extract/ontology.py`, and
-its docstring explains why the list is closed.
+its docstring explains what is closed and what is not.
+
+## The relation vocabulary
+
+Entity types are a closed list per genre (§3.1.1), plus `other` as an escape
+that is reported and never written. Relation types are **the graph's own
+vocabulary**, and a new name is allowed only when nothing in it fits. Decided
+2026-09-11, replacing the paper's seven fixed patterns; the reason is that the
+seven have no `group uses tool`, yet "Volt Typhoon uses Mimikatz" is the
+commonest sentence in an APT report and the graph already holds 1,159 such
+edges from ATT&CK.
+
+What the model is offered is every relation the graph holds *between types the
+extractor can produce* -- the paper's six names plus `mitigates`, `counters`,
+`subtechnique_of`, `attributed_to`, `detects` from ATT&CK and D3FEND -- eleven
+in all, each with a one-line definition and the typical direction. The graph's
+other 26 relation types (between weaknesses, artifacts, analytics, platforms:
+node types the extractor never emits) are known to the pipeline but not
+offered, and NVD's `related_to` is not offered either. Each of these was tried
+and measured on the same three test documents:
+
+| Design | What happened |
+|---|---|
+| All 37 graph relations offered, catalog ones with a warning | On a tool-lineage text the model used `has_analytic` for tool → tool three times and proposed no new name |
+| `related_to` offered | "shares code with" and "bundled with" both became `related_to` -- the escape route never fired |
+| Relation as an enum of the vocabulary plus `other` | Under constrained decoding the model never once chose `other`; it tried `uses`, `subtechnique_of` and `targets` for two tools that share code |
+| Eleven offered; relation as a free string, canonicalised in code | `shares_code_with`, `successor_of`, `bundled_with`, `communicates_with` proposed and confirmed; `uses` still used where it fits; nothing new on the two texts where nothing new was needed |
+
+So the enum's job -- one spelling per known relation -- moved into
+`ontology.normalise_relation`: `Uses`, `USES` and `uses` are one relation, and
+a name that is not a known one is new. The verification half is what keeps the
+wider vocabulary honest: opening what a relation may be *called* did not loosen
+what counts as evidence for it. Measured on the Volt Typhoon advisory across
+the change: 14 relations before (technique-centred, because only technique
+patterns existed) and 14 after, now group-centred -- `Volt Typhoon uses`
+Mimikatz, Impacket, FRP, OS Credential Dumping, Internal Proxy -- the same
+`USES` shape ATT&CK itself uses, so the report's edges sit next to the
+catalog's.
+
+A new relation type is written on commit (the writer uppercases it:
+`shares_code_with` → `SHARES_CODE_WITH`) and listed in the proposal under
+`new_relations` so it is seen before that happens. Verified: five relations
+committed from the lineage text created four new types on the existing
+ATT&CK nodes for ShadowPad, PlugX and Cobalt Strike, then were deleted again
+because the text was invented.
 
 ## Three things worth knowing before trusting a number
 
@@ -252,9 +305,13 @@ text, and has not yet been measured on hard text.
   justify.
 - **Local open-weight models, not o1 / DeepSeek-R1 / Claude 3.7.** The likeliest
   source of a lower F1 than the paper's.
-- **`reflects` and `solves` are absent.** §3.1.2 names them in prose; nothing
-  in the paper gives them a triple pattern or evaluates them. Figure 2's seven
-  patterns are what is implemented.
+- **The relation vocabulary is the graph's, not Figure 2's seven patterns.**
+  The seven are included; so is everything the graph holds between
+  extractable types, and a new name is allowed as a last resort. See "The
+  relation vocabulary" above for why and for what was measured. `reflects`
+  and `solves`, which §3.1.2 names in prose but never patterns or evaluates,
+  are still absent -- a model may of course propose either as a new name if a
+  text states it.
 - **D3FEND ids are names, not `D3-PLA`.** In this graph a defensive technique's
   id is `AccessMediation`, not the short code Figure 3 shows, so no regex can
   find one in prose. Defensive techniques reach their node by embedding

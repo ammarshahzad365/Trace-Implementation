@@ -1,4 +1,4 @@
-"""The four prompts, each with the JSON Schema that constrains its answer.
+"""The five prompts, each with the JSON Schema that constrains its answer.
 
 Keeping prompt text and schema together is deliberate: they are one contract. A
 prompt that asks for a field the schema forbids produces a confusing failure, and
@@ -10,6 +10,10 @@ schema, so:
 - the extraction schema's `type` enum makes a type outside `ontology.py`
   **unrepresentable**, which is what lets the prompt stop policing vocabulary and
   spend its words on telling the types apart instead;
+- the relation schema's `source`/`target` enums contain only the entities found
+  in that chunk, so a relation cannot name an entity that was never extracted,
+  and its `relation` enum is the graph's vocabulary plus `other` -- a known type
+  cannot be misspelt into a new one;
 - the alignment schema's `match_id` enum contains only the candidate ids that
   were actually shown, so the judge cannot hallucinate a node id -- the one
   failure that would silently point an edge at the wrong entity.
@@ -28,7 +32,16 @@ from __future__ import annotations
 import json
 from typing import Any, Sequence
 
-from .ontology import GENRES, OTHER, RELATION_DEFINITIONS, TYPE_DEFINITIONS, Pattern, entity_types
+from .ontology import (
+    GENRES,
+    OTHER,
+    RELATION_DEFINITIONS,
+    TYPE_DEFINITIONS,
+    Pattern,
+    entity_types,
+    patterns_for,
+    relation_names,
+)
 
 _SYSTEM = (
     "You are a careful cybersecurity analyst building a knowledge graph. "
@@ -197,7 +210,98 @@ def extraction_prompt(
 
 
 # --------------------------------------------------------------------------
-# 3. Step two: does the text state this relation? (section 3.2.2)
+# 3. Step two, first half: which relations does the text state, and of what
+#    type? (section 3.2.2, with the graph's vocabulary rather than seven patterns)
+# --------------------------------------------------------------------------
+
+
+def relation_schema(entity_labels: Sequence[str]) -> dict[str, Any]:
+    """`source`/`target` are enums of the entities shown, so a relation cannot
+    name something never extracted. `relation` is a free string on purpose.
+
+    It was an enum of the vocabulary plus `other` first, and under constrained
+    decoding the model never once chose `other`: for two tools that share code
+    it tried `uses`, `subtechnique_of` and `targets` in turn rather than reach
+    the escape value. A free string lets it copy a known name or write a new
+    one in the same breath; `ontology.normalise_relation` then folds case and
+    punctuation, and whatever is not a known name is new. The prompt carries
+    the vocabulary; the code does the canonicalising the enum used to do.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "relations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "source": {"enum": list(entity_labels)},
+                        "relation": {"type": "string"},
+                        "target": {"enum": list(entity_labels)},
+                        "evidence": {"type": "string"},
+                    },
+                    "required": ["source", "relation", "target", "evidence"],
+                },
+            }
+        },
+        "required": ["relations"],
+    }
+
+
+def relation_prompt(
+    genre: str, entities: Sequence[tuple[str, str, str]], chunk_text: str
+) -> tuple[str, str]:
+    """Propose relations among the entities of one chunk.
+
+    `entities` is (label, paper type, description). The label is what the
+    schema's enums use, so it must be unique per entity -- the caller makes it
+    `name (type)`.
+
+    The vocabulary offered is `ontology.relation_names()` -- the graph's
+    relations between extractable types plus the paper's -- and `other` as the
+    route for anything it cannot express, with the rule that an existing type
+    wins whenever its definition genuinely fits. That is the user's decision of
+    2026-09-11: resolve into what the graph already says before adding to what
+    it can say. Offering the catalogs' other 26 relations as well was tried and
+    measured; see `ontology.CATALOG_RELATIONS` for why they are not here.
+    """
+    listed = "\n".join(
+        f"  {label} -- {paper_type}: {description}" if description else f"  {label} -- {paper_type}"
+        for label, paper_type, description in entities
+    )
+    offered = "\n".join(f"  {name}: {RELATION_DEFINITIONS[name]}" for name in relation_names())
+    typical = "; ".join(
+        f"{p.source} --{p.relation}--> {p.target}" for p in patterns_for(genre)
+    )
+    user = (
+        f"Find every relationship that THIS TEXT states between the entities below. "
+        f"The text is an excerpt of {GENRES[genre]}.\n\n"
+        f"ENTITIES FOUND IN THIS TEXT (use these labels exactly)\n{listed}\n\n"
+        f"RELATION TYPES the knowledge graph already uses. Copy one of these names exactly "
+        f"whenever its definition genuinely describes the relationship:\n{offered}\n"
+        f"  Typical directions: {typical}\n\n"
+        "  If the text states a relationship that none of the types above describes -- for "
+        "example two tools that share code, are bundled together, or one succeeds another -- "
+        "write a NEW short lowercase snake_case name as the relation (shares_code_with, "
+        "successor_of, bundled_with, communicates_with, ...). Do not stretch an existing "
+        "type to avoid this: a relationship with the wrong type is worse than a new type.\n\n"
+        "RULES\n"
+        "  - Report only relationships the text states. Quote the sentence in 'evidence'; "
+        "it must mention both entities.\n"
+        "  - Two entities in the same sentence is not a relationship. The text must connect them.\n"
+        "  - Direction matters: 'source' is the subject of the relation as defined above "
+        "('source' used_by 'target' means the vulnerability is the source and the group the target).\n"
+        "  - An asset (a device, system, product or organisation) is never 'used'. Something "
+        "attacked, exploited or compromised is 'targets'.\n"
+        "  - One relationship per pair and type; do not repeat.\n"
+        "  - If the text states nothing between these entities, return an empty list.\n\n"
+        f"TEXT\n{chunk_text}"
+    )
+    return _SYSTEM, user
+
+
+# --------------------------------------------------------------------------
+# 4. Step two, second half: does the text state this relation? (section 3.2.2)
 # --------------------------------------------------------------------------
 
 VALIDATION_SCHEMA: dict[str, Any] = {
@@ -251,8 +355,15 @@ def validation_prompt(
         for index, source, pattern, target in candidates
     )
     used = sorted({pattern.relation for _, _, pattern, _ in candidates})
+    # A name outside the vocabulary was proposed by the model itself in the
+    # first half of step two; the judge sees it flagged as such and takes its
+    # meaning from the words.
     meanings = "\n".join(
-        f"  {relation}: {RELATION_DEFINITIONS.get(relation, '')}" for relation in used
+        f"  {relation}: "
+        + RELATION_DEFINITIONS.get(
+            relation, "a new relation proposed for this document; judge it by its plain meaning"
+        )
+        for relation in used
     )
     user = (
         "For each candidate relationship below, decide whether THIS TEXT states "
@@ -274,7 +385,7 @@ def validation_prompt(
 
 
 # --------------------------------------------------------------------------
-# 4. Are these the same real-world entity? (section 5.2.2)
+# 5. Are these the same real-world entity? (section 5.2.2)
 # --------------------------------------------------------------------------
 
 
@@ -310,7 +421,9 @@ def alignment_prompt(
         "Threat actors, malware and tools are often known by several names, so "
         "different names can still be the same entity. But a different tool or "
         "group that merely has a similar purpose is NOT the same entity, and "
-        "neither are versions, variants or family members. If none matches, "
+        "neither are versions, variants or family members. Match on what the new "
+        "entity IS, not on what its description mentions: a tool described as "
+        "'bundled with X' or 'used alongside X' is not X. If none matches, "
         "answer null -- a wrong match is worse than a missed one, because it "
         "merges two things that are not the same.\n\n"
         f"NEW ENTITY\n  type: {entity_type}\n  name: {name}\n"

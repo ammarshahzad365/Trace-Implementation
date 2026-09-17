@@ -11,21 +11,28 @@ was dropped, and what the fixed ontology could not place. `jobs.py` stores it an
 
 ## Two-step extraction (section 3.2.2)
 
-Step one asks *what entities are here*. Step two takes those entities, forms the
-pairs the relation schema allows, and asks the model whether the text actually
-states each one. Splitting it this way is the paper's design and it matters: a
-model asked for entities and relations in a single breath will cheerfully assert
-a relation because it is true in the world, not because the document said it.
-Asking separately, with the sentence demanded as evidence, is what makes the
-edges traceable.
+Step one asks *what entities are here*. Step two has two halves: the model is
+shown the entities of a chunk and the graph's relation vocabulary and asked
+which relations the text states between them -- an existing type if one fits,
+a proposed name only if none does -- and then every proposed relation goes back
+to the model in a separate call asking whether the text actually states it,
+with the sentence demanded as evidence. Splitting it this way is the paper's
+design and it matters: a model asked for entities and relations in a single
+breath will cheerfully assert a relation because it is true in the world, not
+because the document said it. Asking separately, with the sentence demanded as
+evidence, is what makes the edges traceable.
+
+Before 2026-09-11 the first half was not a model call at all: the code formed
+every pair that fit one of the paper's seven patterns. That made `group uses
+tool` -- the commonest statement in an APT report, and 1,159 edges in the graph
+already -- unrepresentable. The vocabulary is now the graph's; see ontology.py.
 
 ## Where the cost goes
 
-Pairs grow with the square of the entity count -- 30 entities is up to 435 pairs
--- so three cuts happen before any model call: only pairs whose types fit an
-allowed pattern, only pairs whose entities appeared in the same chunk, and the
-survivors batched ten to a request. Without those, relation validation would
-dominate the runtime of the whole pipeline.
+One proposal call per chunk, then verification batched ten relations to a
+request, grouped by chunk so the context is sent once. The verification pass is
+what keeps the wider vocabulary honest: opening what a relation may be *called*
+does not loosen what counts as evidence for it.
 """
 
 from __future__ import annotations
@@ -61,6 +68,7 @@ class Proposal:
     near_misses: list[dict] = field(default_factory=list)
     dropped: list[dict] = field(default_factory=list)
     other: list[dict] = field(default_factory=list)
+    new_relations: list[dict] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
@@ -71,6 +79,7 @@ class Proposal:
             "near_misses": self.near_misses,
             "dropped": self.dropped,
             "other": self.other,
+            "new_relations": self.new_relations,
             "stats": self.stats,
         }
 
@@ -185,32 +194,79 @@ def _merge(candidates: Sequence[Candidate]) -> dict[str, Candidate]:
     return merged
 
 
-def _candidate_pairs(
-    genre: str, per_chunk: Sequence[set[str]], merged: dict[str, Candidate]
-) -> list[tuple[str, ontology.Pattern, str, int]]:
-    """(source key, pattern, target key, chunk index) for every allowed pairing."""
-    patterns = ontology.patterns_for(genre)
-    by_type: dict[str, list[str]] = {}
-    for key, candidate in merged.items():
-        by_type.setdefault(candidate.paper_type, []).append(key)
+def _propose_relations(
+    cfg: Settings,
+    genre: str,
+    per_chunk: Sequence[set[str]],
+    merged: dict[str, Candidate],
+    chunks: Sequence[chunking.Chunk],
+    progress: Progress | None,
+) -> tuple[list[tuple[str, ontology.Pattern, str, int]], int]:
+    """(source key, pattern, target key, chunk index) for every relation the
+    model proposes, plus how many proposals were refused for an unusable name.
 
+    The model is shown the graph's relation types and writes one of their
+    names, or a new one when none fits. Every name is normalised to
+    snake_case; if what remains is not an identifier -- an empty string, a
+    sentence -- the relation is dropped here rather than written as a type
+    nobody could query. A name that equals a known type is that type; any
+    other is new, and `_assemble` lists it under `new_relations`.
+    """
+    proposals: list[tuple[str, ontology.Pattern, str, int]] = []
     seen: set[tuple[str, str, str]] = set()
-    pairs: list[tuple[str, ontology.Pattern, str, int]] = []
-
-    def add(source: str, pattern: ontology.Pattern, target: str, index: int) -> None:
-        signature = (source, pattern.relation, target)
-        if source != target and signature not in seen:
-            seen.add(signature)
-            pairs.append((source, pattern, target, index))
+    unnamed = 0
 
     for index, keys in enumerate(per_chunk):
-        for pattern in patterns:
-            sources = [k for k in by_type.get(pattern.source, ()) if k in keys]
-            targets = [k for k in by_type.get(pattern.target, ()) if k in keys]
-            for source in sources:
-                for target in targets:
-                    add(source, pattern, target, index)
-    return pairs
+        present = [merged[key] for key in keys if key in merged]
+        if len(present) < 2:
+            continue
+        if progress:
+            progress(f"finding relations, chunk {index + 1} of {len(chunks)}")
+        # Labels must be unique for the enum and unambiguous to map back:
+        # "PowerShell (tool)" and "PowerShell (technique)" are different entities.
+        by_label = {f"{c.name} ({c.paper_type})": c for c in present}
+        shown = [
+            (label, c.paper_type, c.description[:160]) for label, c in by_label.items()
+        ]
+        system, user = prompts.relation_prompt(genre, shown, chunks[index].text)
+        answer = llm.chat_json(
+            cfg, system=system, user=user, schema=prompts.relation_schema(list(by_label))
+        )
+        for row in answer.get("relations", []):
+            read = _read_relation(row, by_label)
+            if isinstance(read, str):
+                unnamed += read == "unnamed"
+                continue
+            source, relation, target = read
+            signature = (source.key, relation, target.key)
+            if signature not in seen:
+                seen.add(signature)
+                pattern = ontology.Pattern(source.paper_type, relation, target.paper_type)
+                proposals.append((source.key, pattern, target.key, index))
+    return proposals, unnamed
+
+
+def _read_relation(
+    row: dict, by_label: dict[str, Candidate]
+) -> tuple[Candidate, str, Candidate] | str:
+    """One proposed relation as (source, relation, target), or why it is unusable."""
+    source = by_label.get(str(row.get("source", "")))
+    target = by_label.get(str(row.get("target", "")))
+    if source is None or target is None:
+        return "unknown entity"  # the enum makes this unreachable; belt and braces
+    if source.key == target.key:
+        return "self-relation"
+    # A known name, or a new one -- the same normalisation decides which, so
+    # `Uses`, `USES` and `uses` are one relation and `shares code with` is a
+    # well-formed new one. See `prompts.relation_schema` for why this is not
+    # an enum.
+    relation = ontology.normalise_relation(str(row.get("relation", "")))
+    if relation is None:
+        return "unnamed"
+    swap, relation = ontology.orient(source.paper_type, relation, target.paper_type)
+    if swap:
+        source, target = target, source
+    return source, relation, target
 
 
 # Techniques are paraphrased by the model ("Network proxy" for "proxies all of
@@ -235,7 +291,15 @@ def _content_words(text: str) -> set[str]:
     }
 
 
-def _named_in(evidence: str, candidate: Candidate) -> bool:
+# How a report refers back to the one actor it is about, after naming it once.
+_GENERIC_ACTOR = re.compile(
+    r"\b(?:the|this|that)\s+(?:threat\s+)?(?:actors?|group|adversary|adversaries|attackers?|intrusion set)\b"
+    r"|\b(?:it|its|they|their)\b",
+    re.I,
+)
+
+
+def _named_in(evidence: str, candidate: Candidate, *, antecedent: bool = False) -> bool:
     """Does the evidence sentence actually concern this entity?
 
     For a concrete entity -- a tool, a group, a CVE, an asset -- that means its
@@ -249,8 +313,22 @@ def _named_in(evidence: str, candidate: Candidate) -> bool:
     one report before this: 54 of 90 pairs confirmed, most of them one
     technique paired with every tool in the document on a sentence that named
     the tool and had nothing to do with the technique.
+
+    `antecedent` handles the one coreference a report relies on: it names its
+    actor, then says "the actor", "the group", "it". When this group is the
+    group most recently named before the evidence sentence, such a reference
+    means it, and counts as naming it. Measured on the Volt Typhoon advisory:
+    without this, 11 of 21 correctly proposed relations were rejected, every
+    one on a sentence beginning "The actor ..." or "It ...". A first version
+    allowed it only when the group was the *only* group in the chunk; on the
+    ProxyLogon text, which names ToddyCat two paragraphs after "tracks as
+    Hafnium. The group exploited ...", that dropped 7 of 9 relations. Nearest
+    antecedent is the rule a reader applies, and it fails only where a reader
+    would hesitate too.
     """
     haystack = evidence.lower()
+    if antecedent and candidate.paper_type == "group" and _GENERIC_ACTOR.search(evidence):
+        return True
     if candidate.paper_type in _PARAPHRASED_TYPES:
         wanted = _content_words(candidate.description) | _content_words(candidate.name)
         if not wanted:
@@ -260,7 +338,7 @@ def _named_in(evidence: str, candidate: Candidate) -> bool:
     name = candidate.name.lower()
     if name in haystack:
         return True
-    words = sorted((w for w in re.findall(r"[a-z0-9][a-z0-9.-]{3,}", name)), key=len, reverse=True)
+    words = sorted(re.findall(r"[a-z0-9][a-z0-9.-]{3,}", name), key=len, reverse=True)
     return any(word in haystack for word in words[:2])
 
 
@@ -268,6 +346,8 @@ def _accepted(
     answer: dict,
     batch: Sequence[tuple[str, ontology.Pattern, str]],
     merged: dict[str, Candidate],
+    chunk_text: str = "",
+    groups: Sequence[Candidate] = (),
 ) -> list[tuple[str, ontology.Pattern, str, str]]:
     """The rows of one validation answer that confirm a relation.
 
@@ -275,7 +355,8 @@ def _accepted(
     constrain to a valid range -- a model can return `"index": 47` for a batch of
     ten, and attaching that evidence to whatever pair happened to be there would
     be worse than dropping it. And the evidence must name the concrete entities
-    it is supposed to be evidence for; see `_named_in`.
+    it is supposed to be evidence for; see `_named_in`. `groups` are the group
+    candidates present in this chunk, for resolving "the actor".
     """
     kept: list[tuple[str, ontology.Pattern, str, str]] = []
     for row in answer.get("results", []):
@@ -288,10 +369,42 @@ def _accepted(
         evidence = str(row.get("evidence", ""))[:1000]
         if not evidence.strip():
             continue
-        if not (_named_in(evidence, merged[source]) and _named_in(evidence, merged[target])):
+        antecedent = _antecedent_group(chunk_text, evidence, groups)
+        if not all(
+            _named_in(evidence, merged[key], antecedent=key == antecedent)
+            for key in (source, target)
+        ):
             continue
         kept.append((source, pattern, target, evidence))
     return kept
+
+
+def _antecedent_group(chunk_text: str, evidence: str, groups: Sequence[Candidate]) -> str | None:
+    """The key of the group most recently named before `evidence` in the chunk.
+
+    Locates the evidence by its opening words (the model sometimes elides the
+    middle of a long sentence with "..."), then takes the group whose name --
+    or longest word, so "the Hafnium actor" finds HAFNIUM -- last appears
+    before that point. If the evidence cannot be found, or names a group
+    itself, the answer is the last group named anywhere before the end of the
+    chunk that the evidence could be in -- which for a single-group chunk is
+    simply that group, and for a multi-group one is a guess the caller should
+    not need, because the evidence then usually names its actor outright.
+    """
+    if not groups:
+        return None
+    text = chunk_text.lower()
+    opening = evidence.strip().lower().replace("…", "...").split("...")[0].strip()[:60]
+    position = text.find(opening) if opening else -1
+    before = text[:position] if position >= 0 else text
+    best_key, best_at = None, -1
+    for group in groups:
+        name = group.name.lower()
+        words = sorted(re.findall(r"[a-z0-9][a-z0-9.-]{3,}", name), key=len, reverse=True)
+        at = max((before.rfind(needle) for needle in (name, *words[:1])), default=-1)
+        if at > best_at:
+            best_key, best_at = group.key, at
+    return best_key if best_at >= 0 else None
 
 
 def _validate_pairs(
@@ -299,6 +412,7 @@ def _validate_pairs(
     pairs: Sequence[tuple[str, ontology.Pattern, str, int]],
     merged: dict[str, Candidate],
     chunks: Sequence[chunking.Chunk],
+    per_chunk: Sequence[set[str]],
     progress: Progress | None,
 ) -> list[tuple[str, ontology.Pattern, str, str]]:
     """Ask the model which candidate triples the text actually states."""
@@ -310,6 +424,11 @@ def _validate_pairs(
 
     done = 0
     for index, group in by_chunk.items():
+        groups_here = [
+            merged[key]
+            for key in per_chunk[index]
+            if key in merged and merged[key].paper_type == "group"
+        ]
         for start in range(0, len(group), VALIDATION_BATCH):
             batch = group[start : start + VALIDATION_BATCH]
             numbered = [
@@ -327,7 +446,9 @@ def _validate_pairs(
             answer = llm.chat_json(
                 cfg, system=system, user=user, schema=prompts.VALIDATION_SCHEMA
             )
-            confirmed.extend(_accepted(answer, batch, merged))
+            confirmed.extend(
+                _accepted(answer, batch, merged, chunks[index].text, groups_here)
+            )
             done += len(batch)
             if progress:
                 progress(f"checking relations, {done} of {len(pairs)}")
@@ -399,9 +520,8 @@ def run(
         if candidate.paper_type != ontology.OTHER
     }
 
-    step("pairing entities")
-    pairs = _candidate_pairs(genre, per_chunk, merged)
-    confirmed = _validate_pairs(cfg, pairs, merged, chunks, progress)
+    pairs, unnamed = _propose_relations(cfg, genre, per_chunk, merged, chunks, progress)
+    confirmed = _validate_pairs(cfg, pairs, merged, chunks, per_chunk, progress)
 
     # Section 3.2.3: drop nodes that are both isolated and named only by a serial
     # number. Both conditions -- a lone node with a real name is knowledge.
@@ -441,7 +561,8 @@ def run(
             "characters": len(body),
             "chunks": len(chunks),
             "candidates": len(merged),
-            "pairs_considered": len(pairs),
+            "relations_proposed": len(pairs),
+            "relations_unnamed": unnamed,
         },
     )
 
@@ -499,6 +620,7 @@ def _assemble(
         )
 
     seen_edges: set[str] = set()
+    new_relations: dict[str, dict] = {}
     for source_key, pattern, target_key, evidence in confirmed:
         start, end = final_id.get(source_key), final_id.get(target_key)
         if not start or not end or start == end:
@@ -523,12 +645,28 @@ def _assemble(
                 "extracted_by": cfg.extract_model,
             }
         )
+        # A relation type the graph does not hold yet is review information of
+        # the same kind as `other`: what the vocabulary could not express. It is
+        # written -- the user's decision -- but listed so it is seen first.
+        if not ontology.is_known_relation(pattern.relation):
+            entry = new_relations.setdefault(
+                pattern.relation,
+                {"relation": pattern.relation, "count": 0, "example": evidence[:200]},
+            )
+            entry["count"] += 1
 
     proposal.dropped = dropped
     proposal.other = other
+    proposal.new_relations = list(new_relations.values())
+    relation_counts: dict[str, int] = {}
+    for record in proposal.relationships:
+        relation_counts[record["relationship_type"]] = (
+            relation_counts.get(record["relationship_type"], 0) + 1
+        )
     proposal.stats = {
         **counts,
         "relations_confirmed": len(confirmed),
+        "relation_types": relation_counts,
         "entities_new": len(proposal.entities),
         "entities_aligned": len(proposal.aligned),
         "aligned_by_identifier": sum(

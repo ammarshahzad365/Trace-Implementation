@@ -131,6 +131,32 @@ def by_exact_name(handle: Session, labels: Sequence[str], name: str) -> dict | N
     return None
 
 
+def by_name_overlap(handle: Session, labels: Sequence[str], name: str) -> list[dict]:
+    """Nodes of these labels whose name is inside `name`, or contains it.
+
+    The candidates for `align._name_contained`, which applies the word-boundary
+    and length rules; this only narrows ~10,000 nodes to a handful with a
+    substring test. Fetched by name rather than taken from the embedding
+    search because the embedding search can miss them: "Cobalt Strike beacon:
+    bundled with ShadowPad" retrieved ShadowPad and not Cobalt Strike.
+    """
+    wanted = name.strip().lower()
+    if len(wanted) < 3:
+        return []
+    found: list[dict] = []
+    for label in labels:
+        found.extend(
+            handle.run(
+                f"MATCH (n:`{assert_identifier(label, 'node label')}`) "
+                "WHERE n.name IS NOT NULL AND ("
+                "  $name CONTAINS toLower(n.name) OR toLower(n.name) CONTAINS $name) "
+                "RETURN n.id AS id, n.name AS name, n.description AS description LIMIT 10",
+                name=wanted,
+            ).data()
+        )
+    return found
+
+
 def labels_in_use(handle: Session) -> list[str]:
     rows = handle.run("CALL db.labels() YIELD label RETURN label ORDER BY label")
     return [row["label"] for row in rows]
