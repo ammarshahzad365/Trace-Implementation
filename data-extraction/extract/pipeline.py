@@ -67,7 +67,7 @@ class Proposal:
     aligned: list[dict] = field(default_factory=list)
     near_misses: list[dict] = field(default_factory=list)
     dropped: list[dict] = field(default_factory=list)
-    other: list[dict] = field(default_factory=list)
+    new_types: list[dict] = field(default_factory=list)
     new_relations: list[dict] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
 
@@ -78,7 +78,7 @@ class Proposal:
             "aligned": self.aligned,
             "near_misses": self.near_misses,
             "dropped": self.dropped,
-            "other": self.other,
+            "new_types": self.new_types,
             "new_relations": self.new_relations,
             "stats": self.stats,
         }
@@ -87,23 +87,31 @@ class Proposal:
 def _extract_nodes(
     cfg: Settings, genre: str, chunk: chunking.Chunk, reference: Sequence[dict]
 ) -> list[Candidate]:
+    """The model writes a type name; `ontology.normalise_type` makes it an
+    offered type (directly or through an alias) or a new one. A name that
+    normalises to nothing usable is dropped with the node."""
     system, user = prompts.extraction_prompt(genre, chunk.text, reference)
     answer = llm.chat_json(
-        cfg, system=system, user=user, schema=prompts.extraction_schema(genre)
+        cfg, system=system, user=user, schema=prompts.extraction_schema()
     )
     found: list[Candidate] = []
     for node in answer.get("nodes", []):
         name = str(node.get("name", "")).strip()
-        if not name:
+        type_name = ontology.normalise_type(str(node.get("type", "")))
+        if not name or type_name is None:
+            continue
+        # A node named by its own type word -- "campaign", "the actor" -- is
+        # the model labelling a mention it could not name; it carries no
+        # identity, and once aligned it lands on whichever real campaign the
+        # embedding likes (measured: "campaign" -> "Indian Critical
+        # Infrastructure Intrusions" at 0.55).
+        if ontology.normalise_type(name) in (type_name, ontology.repo_type(type_name)):
             continue
         found.append(
             Candidate(
-                paper_type=str(node.get("type", "")),
+                paper_type=type_name,
                 name=name,
                 description=str(node.get("description", "")).strip(),
-                other_type=(str(node.get("other_type")).strip() or None)
-                if node.get("other_type")
-                else None,
             )
         )
     return found
@@ -116,9 +124,9 @@ def _identifier_candidates(handle: Session, text: str) -> list[Candidate]:
     a regex is strictly better than a model at finding it. The graph supplies the
     type, because `S0066` could be malware or a tool and only the graph knows.
 
-    Identifiers whose label is outside the unstructured ontology -- a `CWE-79`
-    landing on `Weakness` -- are skipped: no allowed triple pattern could use
-    one, so a candidate for it could never become an edge.
+    Every label the graph holds now maps to an offered type, so a `CWE-79`
+    landing on `Weakness` is a candidate like any other; the skip below is for
+    a label this module has never heard of.
     """
     identifiers = ontology.find_identifiers(text)
     if not identifiers:
@@ -158,12 +166,19 @@ def _retrieve_reference(
     these", so an irrelevant neighbour costs a few tokens and nothing else.
     """
     reference = [{"type": seed.paper_type, "name": seed.name} for seed in seeds]
-    searchable = [
-        (paper_type, label)
-        for paper_type in ontology.entity_types(genre)
-        for label in ontology.align_labels(paper_type)
-        if graph.index_name(label) in indexes
-    ]
+    # Each indexed label once, under the type it primarily belongs to; with
+    # every graph label now offerable that is ~20 small vector queries per
+    # chunk. `genre` no longer narrows the types.
+    searchable: list[tuple[str, str]] = []
+    seen_labels: set[str] = set()
+    for paper_type in ontology.entity_types():
+        for label in ontology.align_labels(paper_type):
+            if label in seen_labels or graph.index_name(label) not in indexes:
+                continue
+            if ontology.paper_type_for_label(label) != paper_type:
+                continue
+            seen_labels.add(label)
+            searchable.append((paper_type, label))
     if not searchable:
         return reference
     vector = llm.embed(cfg, [chunk_text[:2000]])[0]
@@ -269,11 +284,6 @@ def _read_relation(
     return source, relation, target
 
 
-# Techniques are paraphrased by the model ("Network proxy" for "proxies all of
-# its traffic"), so their names cannot be expected in the evidence verbatim.
-# Everything else -- a tool, a group, a CVE, an asset -- is a concrete noun the
-# text either names or does not.
-_PARAPHRASED_TYPES = {"technique", "defend_technique"}
 
 
 _STOPWORDS = frozenset(
@@ -283,20 +293,38 @@ _STOPWORDS = frozenset(
 )
 
 
+def _refers_generically(evidence: str, type_name: str) -> bool:
+    """Does the evidence refer to an entity of this type by a generic noun or
+    a pronoun -- "the group", "the campaign", "it"?"""
+    if type_name in ontology.ACTOR_TYPES:
+        return bool(_GENERIC_ACTOR.search(evidence) or _PRONOUN.search(evidence))
+    if type_name in _CAMPAIGN_TYPES:
+        return bool(_GENERIC_CAMPAIGN.search(evidence) or _PRONOUN.search(evidence))
+    return False
+
+
 def _content_words(text: str) -> set[str]:
+    """Content words as six-letter stems, so "Exfiltration" and "exfiltrated"
+    count as the same word -- the overlap test between a paraphrased name and
+    the evidence sentence was failing on exactly that inflection."""
     return {
-        word
+        word[:6]
         for word in re.findall(r"[a-z][a-z0-9-]{3,}", text.lower())
         if word not in _STOPWORDS
     }
 
 
-# How a report refers back to the one actor it is about, after naming it once.
+# How a report refers back to the actor or the campaign it is about, after
+# naming it once. Actor words resolve among actor-type entities, campaign
+# words among campaigns, pronouns among either -- so "the group" never
+# resolves to a campaign that happened to be named more recently.
 _GENERIC_ACTOR = re.compile(
-    r"\b(?:the|this|that)\s+(?:threat\s+)?(?:actors?|group|adversary|adversaries|attackers?|intrusion set)\b"
-    r"|\b(?:it|its|they|their)\b",
+    r"\b(?:the|this|that)\s+(?:threat\s+)?(?:actors?|group|adversary|adversaries|attackers?|operators?|intruders?|intrusion set)\b",
     re.I,
 )
+_GENERIC_CAMPAIGN = re.compile(r"\b(?:the|this|that)\s+(?:campaign|operation|activity|intrusions?)\b", re.I)
+_PRONOUN = re.compile(r"\b(?:it|its|they|their)\b", re.I)
+_CAMPAIGN_TYPES = frozenset({"campaign"})
 
 
 def _named_in(evidence: str, candidate: Candidate, *, antecedent: bool = False) -> bool:
@@ -327,9 +355,9 @@ def _named_in(evidence: str, candidate: Candidate, *, antecedent: bool = False) 
     would hesitate too.
     """
     haystack = evidence.lower()
-    if antecedent and candidate.paper_type == "group" and _GENERIC_ACTOR.search(evidence):
+    if antecedent and _refers_generically(evidence, candidate.paper_type):
         return True
-    if candidate.paper_type in _PARAPHRASED_TYPES:
+    if candidate.paper_type in ontology.PARAPHRASED_TYPES:
         wanted = _content_words(candidate.description) | _content_words(candidate.name)
         if not wanted:
             return True
@@ -369,9 +397,14 @@ def _accepted(
         evidence = str(row.get("evidence", ""))[:1000]
         if not evidence.strip():
             continue
-        antecedent = _antecedent_group(chunk_text, evidence, groups)
+        actors = [g for g in groups if g.paper_type in ontology.ACTOR_TYPES]
+        campaigns = [g for g in groups if g.paper_type in _CAMPAIGN_TYPES]
+        antecedents = {
+            _antecedent_group(chunk_text, evidence, actors),
+            _antecedent_group(chunk_text, evidence, campaigns),
+        }
         if not all(
-            _named_in(evidence, merged[key], antecedent=key == antecedent)
+            _named_in(evidence, merged[key], antecedent=key in antecedents)
             for key in (source, target)
         ):
             continue
@@ -427,7 +460,7 @@ def _validate_pairs(
         groups_here = [
             merged[key]
             for key in per_chunk[index]
-            if key in merged and merged[key].paper_type == "group"
+            if key in merged and merged[key].paper_type in (ontology.ACTOR_TYPES | _CAMPAIGN_TYPES)
         ]
         for start in range(0, len(group), VALIDATION_BATCH):
             batch = group[start : start + VALIDATION_BATCH]
@@ -503,23 +536,6 @@ def run(
 
     merged = _merge(all_candidates)
 
-    # `other` is reported, never written: it is the measurement of what the fixed
-    # ontology misses, not a licence to invent labels.
-    other = [
-        {
-            "name": candidate.name,
-            "other_type": candidate.other_type,
-            "description": candidate.description,
-        }
-        for candidate in merged.values()
-        if candidate.paper_type == ontology.OTHER
-    ]
-    merged = {
-        key: candidate
-        for key, candidate in merged.items()
-        if candidate.paper_type != ontology.OTHER
-    }
-
     pairs, unnamed = _propose_relations(cfg, genre, per_chunk, merged, chunks, progress)
     confirmed = _validate_pairs(cfg, pairs, merged, chunks, per_chunk, progress)
 
@@ -556,7 +572,6 @@ def run(
         confirmed=confirmed,
         final_id=final_id,
         dropped=dropped,
-        other=other,
         counts={
             "characters": len(body),
             "chunks": len(chunks),
@@ -575,7 +590,6 @@ def _assemble(
     confirmed: Sequence[tuple[str, ontology.Pattern, str, str]],
     final_id: dict[str, str],
     dropped: list[dict],
-    other: list[dict],
     counts: dict,
 ) -> Proposal:
     """Turn decisions into the record shapes `POST /ingest` accepts."""
@@ -588,6 +602,7 @@ def _assemble(
         record = {
             "id": decision.final_id,
             "type": ontology.repo_type(candidate.paper_type),
+            "_type_name": candidate.paper_type,
             "source": source,
             "name": candidate.name,
             "description": candidate.description,
@@ -645,9 +660,9 @@ def _assemble(
                 "extracted_by": cfg.extract_model,
             }
         )
-        # A relation type the graph does not hold yet is review information of
-        # the same kind as `other`: what the vocabulary could not express. It is
-        # written -- the user's decision -- but listed so it is seen first.
+        # A relation type the graph does not hold yet is review information:
+        # what the vocabulary could not express. It is written -- the user's
+        # decision -- but listed so it is seen first.
         if not ontology.is_known_relation(pattern.relation):
             entry = new_relations.setdefault(
                 pattern.relation,
@@ -656,7 +671,20 @@ def _assemble(
             entry["count"] += 1
 
     proposal.dropped = dropped
-    proposal.other = other
+    # Likewise an entity type outside the offered vocabulary: written, and
+    # listed with examples so the reviewer sees what the model coined.
+    new_types: dict[str, dict] = {}
+    for record in proposal.entities:
+        if not ontology.is_known_type(record["_type_name"]):
+            entry = new_types.setdefault(
+                record["_type_name"], {"type": record["_type_name"], "count": 0, "examples": []}
+            )
+            entry["count"] += 1
+            if len(entry["examples"]) < 3:
+                entry["examples"].append(record["name"])
+    for record in proposal.entities:
+        del record["_type_name"]
+    proposal.new_types = list(new_types.values())
     proposal.new_relations = list(new_relations.values())
     relation_counts: dict[str, int] = {}
     for record in proposal.relationships:
@@ -678,7 +706,8 @@ def _assemble(
         "no_vector_index": sum(
             1 for decision in alignment.decisions if decision.method == "no-index"
         ),
-        "other": len(other),
+        "new_types": len(proposal.new_types),
+        "new_relation_types": len(proposal.new_relations),
         "dropped": len(dropped),
         "threshold": cfg.align_threshold,
         "extract_model": cfg.extract_model,

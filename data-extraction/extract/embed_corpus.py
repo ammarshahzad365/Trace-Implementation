@@ -60,9 +60,11 @@ def _labels_to_do(handle, requested: str | None, excluded: str | None) -> list[s
     skip = {name.strip() for name in (excluded or "").split(",") if name.strip()}
     # The labels the unstructured ontology aligns against go first, so the
     # pipeline becomes usable before the whole corpus is done.
-    from extract.ontology import REPO_LABEL
+    from extract.ontology import ENTITY_TYPES, PAPER_TYPES
 
-    priority = [label for label in REPO_LABEL.values() if label in present and label not in skip]
+    wanted_first = [ENTITY_TYPES[name].label for name in PAPER_TYPES]
+    wanted_first += [e.label for e in ENTITY_TYPES.values() if e.label not in wanted_first]
+    priority = [label for label in wanted_first if label in present and label not in skip]
     rest = [name for name in present if name not in skip and name not in priority]
     return priority + rest
 

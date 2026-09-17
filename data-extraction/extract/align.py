@@ -58,7 +58,6 @@ class Candidate:
     paper_type: str
     name: str
     description: str = ""
-    other_type: str | None = None
 
     @property
     def key(self) -> str:
@@ -124,18 +123,19 @@ def embedding_text(name: str, description: str | None) -> str:
 
 
 def _identifier_hit(candidate: Candidate, known: dict[str, dict]) -> dict | None:
-    """Does this candidate's name contain an identifier that exists in the graph?"""
+    """Does this candidate's name contain an identifier that exists in the graph,
+    of a label this candidate's type can be?
+
+    The type check exists because "apply the Outlook patch for CVE-2023-23397"
+    -- a course of action -- was once aligned to the CVE itself: the name
+    contains the identifier, but a mitigation is not a vulnerability.
+    """
+    labels = ontology.align_labels(candidate.paper_type)
     for identifier in ontology.find_identifiers(candidate.name):
         node = known.get(identifier)
-        if node:
+        if node and node.get("label") in labels:
             return node
     return None
-
-
-# Types whose names are names -- a tool, a group, a CVE, a product -- rather
-# than the model's paraphrase of a behaviour. Name containment is only evidence
-# for these.
-_PROPER_NOUN_TYPES = frozenset({"tool", "group", "vuln", "asset", "mitigation"})
 
 
 def _name_contained(name: str, rows: list[dict]) -> dict | None:
@@ -150,8 +150,13 @@ def _name_contained(name: str, rows: list[dict]) -> dict | None:
     and the judge decides.
     """
     needle = name.strip()
-    hits = []
+    # Same name under several ids (ATT&CK's Enterprise/Mobile/ICS copies):
+    # keep the best-connected, which `graph.by_name_overlap` orders first.
+    first_by_name: dict[str, dict] = {}
     for row in rows:
+        first_by_name.setdefault((row.get("name") or "").strip().lower(), row)
+    hits = []
+    for row in first_by_name.values():
         other = (row.get("name") or "").strip()
         shorter, longer = sorted((needle, other), key=len)
         if len(shorter) < 7 and len(shorter.split()) < 2:
@@ -246,7 +251,7 @@ def align(
                     handle, ontology.align_labels(candidate.paper_type), candidate.name
                 ),
             )
-            if candidate.paper_type in _PROPER_NOUN_TYPES
+            if candidate.paper_type in ontology.PROPER_NOUN_TYPES
             else None
         )
         if contained:

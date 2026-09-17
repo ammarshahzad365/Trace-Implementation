@@ -20,6 +20,11 @@ SSH tunnel:
 |---|---|---|
 | Neo4j | `bolt://localhost:7687` | `curl localhost:7474` |
 | The ingest API (stage 3) | `http://127.0.0.1:8000` | `curl localhost:8000/health` |
+
+The ingest API must be the committed version (any entity `type` accepted, label
+derived on the fly). The copy on the server was from 1 September until
+2026-09-17 and refused `identity` with a 422; redeploy `data-loading/` if a
+commit ever says "not declared in catalog/labels.py".
 | Ollama with the models | `http://127.0.0.1:11434` | `curl localhost:11434/api/tags` |
 
 Ollama is installed in `~/ollama` as a tarball (no root on this host) and
@@ -100,15 +105,15 @@ irrelevant ends as `skipped`, which is an outcome, not an error.
 {
   "entities":      [ ...new nodes, in the shape /ingest takes... ],
   "relationships": [ ...edges, each with the sentence that justified it... ],
-  "aligned":       [ {"name": "Hafnium", "type": "group",
+  "aligned":       [ {"name": "Hafnium", "type": "intrusion-set",
                       "matched_id": "G0125", "matched_name": "HAFNIUM",
                       "cosine": 0.63, "method": "embedding",
                       "reason": "same group, same targeting"} ],
-  "near_misses":   [ {"name": "ToddyCat", "type": "group",
+  "near_misses":   [ {"name": "ToddyCat", "type": "intrusion-set",
                       "closest_name": "Threat Group-3390", "cosine": 0.41,
                       "why_new": "nothing of this type reached theta=0.55; closest was ..."} ],
   "dropped":       [ {"name": "SN-4471", "why": "isolated, and named only by a serial number"} ],
-  "other":         [ {"name": "OrpaCrab", "other_type": "backdoor", "description": "..."} ],
+  "new_types":     [ {"type": "cryptocurrency-wallet", "count": 1, "examples": ["44AfFq...9zG"]} ],
   "new_relations": [ {"relation": "shares_code_with", "count": 1,
                       "example": "ShadowPad ... shares a large part of its code base with PlugX"} ],
   "stats":         { ..., "relation_types": {"uses": 12, "targets": 2} }
@@ -121,9 +126,10 @@ A wrong one here points every edge at the wrong entity, which is the failure
 worth ten seconds of your attention. Then `near_misses`: every new entity with
 the closest existing node it did *not* match and the score. If the right answer
 keeps appearing there just under θ, θ is wrong for this embedder. Then
-`new_relations`: relation types the graph does not hold yet, which the model
-proposed because none of the existing ones fit. They *are* written on commit;
-this list is where you see them first.
+`new_types` and `new_relations`: entity and relation types the vocabulary does
+not hold yet, which the model coined because none of the existing ones fit.
+They *are* written on commit -- the loader derives a label from a new type and
+creates its constraint -- and these lists are where you see them first.
 
 **4. Commit.** Writes through the ingest API. `drop_ids` removes anything you
 rejected; dropping an entity also drops the edges that touched it.
@@ -146,10 +152,12 @@ Each stage names the section of the paper it comes from.
    opening text.
 3. **Chunk.** ~4,000 characters, on paragraph boundaries, with overlap.
 4. **Step one -- nodes** (§3.2.2). Per chunk: regex for standard identifiers
-   (`CVE-…`, `T1190`, `G1028`, …), resolved against the graph; then the model,
-   offered only the genre's types, with worked examples and the identifier hits
-   as "what this graph already calls things". Output is schema-constrained, so
-   a type outside the ontology cannot be produced.
+   (`CVE-…`, `CWE-…`, `T1190`, `G1028`, …), resolved against the graph; then
+   the model, shown the whole type vocabulary (below) with worked examples and
+   the identifier hits as "what this graph already calls things". It copies a
+   type name, or writes a new one when none fits; `ontology.normalise_type`
+   folds spelling and an alias table ("APT group" → `intrusion-set`, "C2
+   server" → `infrastructure`) so a synonym never becomes a duplicate type.
 5. **Step two -- relations** (§3.2.2), in two halves. First, per chunk, the
    model is shown the entities found there and the relation vocabulary (below)
    and asked which relationships the text states between them, copying an
@@ -179,49 +187,74 @@ The vocabulary -- entity types per genre, relation types, how the paper's names
 map onto this graph's labels -- lives in one file, `extract/ontology.py`, and
 its docstring explains what is closed and what is not.
 
-## The relation vocabulary
+## The vocabulary
 
-Entity types are a closed list per genre (§3.1.1), plus `other` as an escape
-that is reported and never written. Relation types are **the graph's own
-vocabulary**, and a new name is allowed only when nothing in it fits. Decided
-2026-09-11, replacing the paper's seven fixed patterns; the reason is that the
-seven have no `group uses tool`, yet "Volt Typhoon uses Mimikatz" is the
-commonest sentence in an APT report and the graph already holds 1,159 such
-edges from ATT&CK.
+Both lists are open, decided 2026-09-17 at the user's direction. What the
+model is offered, and what it may add:
 
-What the model is offered is every relation the graph holds *between types the
-extractor can produce* -- the paper's six names plus `mitigates`, `counters`,
-`subtechnique_of`, `attributed_to`, `detects` from ATT&CK and D3FEND -- eleven
-in all, each with a one-line definition and the typical direction. The graph's
-other 26 relation types (between weaknesses, artifacts, analytics, platforms:
-node types the extractor never emits) are known to the pipeline but not
-offered, and NVD's `related_to` is not offered either. Each of these was tried
-and measured on the same three test documents:
+| | Offered | May add a new one? |
+|---|---|---|
+| Entity types | the graph's 25 labels + every STIX 2.1 domain object + STIX's report-relevant observables (hash, IP, domain, URL, email, registry key, certificate, mutex …) = **53** | yes -- a new kebab-case name; written, label derived by the loader |
+| Relation types | the graph's 34 + STIX 2.1's relationships + the paper's six = **64** | yes -- a new snake_case name; written, uppercased by the loader |
+
+The table lives in `extract/ontology.py` (`ENTITY_GROUPS`, `RELATION_GROUPS`),
+each entry with a one-line definition and, for entities, the `type` value the
+loader expects and the labels alignment searches (`tool` searches `Tool` and
+`Malware`; `threat-actor` searches `ThreatActor` and `IntrusionSet`, because
+ATT&CK files most actors as intrusion sets). Two names are known but never
+offered: `related_to` (NVD's cross-reference; offered, it became the fallback
+for everything) and `revoked_by` (ATT&CK bookkeeping).
+
+The paper's seven types are the subset `PAPER_TYPES`, under their new names
+(`vuln` → `vulnerability`, `group` → `intrusion-set`, `technique` →
+`attack-technique`, `defend_technique` → `defensive-technique`), and per-type
+F1 against Table 4 is reported over that subset. The old names remain as
+aliases so the gold set still resolves.
+
+**How the model chooses a name.** It must copy an offered name exactly when
+its definition genuinely describes the thing, and write a new one only when
+none does -- "do not stretch an existing type; a wrong type is worse than a
+new one". The code then canonicalises: `Threat Actor` → `threat-actor`,
+`backdoor` → `malware`, `Exfiltrates To` → `exfiltrates_to`; whatever is not
+a known name after that is new. Direction is owned by the schema, not the
+model (`APT41 used_by CVE-…` is turned round), and a few definitions are
+enforced in code because the model did not always follow them: `uses` of an
+asset, identity or location is `targets`; an actor that `uses` or `exploits`
+a vulnerability is the paper's `used_by` the other way round; an actor that
+"drops" or "delivers" something `uses` it.
+
+**Why free strings, not enums.** Both names were JSON-schema enums with an
+`other` escape at first. Under constrained decoding the model never once
+chose `other`: for two malware families that share code it tried `uses`,
+`subtechnique_of` and `targets` in turn. An enum makes the escape value
+unreachable in practice, so the schema now constrains only what the code can
+check afterwards (a relation's endpoints are enums of the entities actually
+found) and the naming moved into code.
+
+**What was measured on the way here**, on the same test documents:
 
 | Design | What happened |
 |---|---|
-| All 37 graph relations offered, catalog ones with a warning | On a tool-lineage text the model used `has_analytic` for tool → tool three times and proposed no new name |
-| `related_to` offered | "shares code with" and "bundled with" both became `related_to` -- the escape route never fired |
-| Relation as an enum of the vocabulary plus `other` | Under constrained decoding the model never once chose `other`; it tried `uses`, `subtechnique_of` and `targets` for two tools that share code |
-| Eleven offered; relation as a free string, canonicalised in code | `shares_code_with`, `successor_of`, `bundled_with`, `communicates_with` proposed and confirmed; `uses` still used where it fits; nothing new on the two texts where nothing new was needed |
+| Seven paper patterns, code forms the pairs (before 2026-09-11) | `group uses tool` -- the commonest statement in an APT report, 1,159 edges in the graph -- was unrepresentable |
+| Graph's 37 relations offered, `related_to` included | "shares code with" and "bundled with" both became `related_to`; and `has_analytic` was used for tool → tool because no analytic could then be extracted |
+| Relation as an enum plus `other` | `other` never chosen |
+| Free string, 11 relations between the then-extractable types | `shares_code_with`, `successor_of`, `bundled_with` coined where needed; nothing new where not |
+| Open entity and relation vocabulary (2026-09-17) | On an IoC-rich report: 21 new nodes across 12 STIX types (campaign, identity, location, email, domain, IPv4, file, certificate, registry key, mutex …), `beacons_to` / `resolves_to` / `attributed_to` / `indicates` from STIX, `signed_with` and `stores_configuration_in` coined. On the earlier four documents the same relations as before plus `targets` on identities and `impersonates`, `exfiltrates_to`, `compromises`. |
 
-So the enum's job -- one spelling per known relation -- moved into
-`ontology.normalise_relation`: `Uses`, `USES` and `uses` are one relation, and
-a name that is not a known one is new. The verification half is what keeps the
-wider vocabulary honest: opening what a relation may be *called* did not loosen
-what counts as evidence for it. Measured on the Volt Typhoon advisory across
-the change: 14 relations before (technique-centred, because only technique
-patterns existed) and 14 after, now group-centred -- `Volt Typhoon uses`
-Mimikatz, Impacket, FRP, OS Credential Dumping, Internal Proxy -- the same
-`USES` shape ATT&CK itself uses, so the report's edges sit next to the
-catalog's.
+The verification half of step two is what keeps the open vocabulary honest:
+opening what a thing may be *called* did not loosen what counts as evidence
+for it. Three rules there were added under measurement: "the actor", "the
+group", "it" resolve to the most recently named actor before the evidence
+sentence, "the campaign" to the most recently named campaign, and word
+overlap between a paraphrased name and its evidence compares six-letter
+stems, so `Exfiltration` matches "exfiltrated".
 
-A new relation type is written on commit (the writer uppercases it:
-`shares_code_with` → `SHARES_CODE_WITH`) and listed in the proposal under
-`new_relations` so it is seen before that happens. Verified: five relations
-committed from the lineage text created four new types on the existing
-ATT&CK nodes for ShadowPad, PlugX and Cobalt Strike, then were deleted again
-because the text was invented.
+**What to watch.** A fifty-type list is the regime the paper's own error
+analysis warns about (tool/technique confusion with five types), so
+`stats.new_types`, `stats.new_relation_types` and the per-type counts are in
+every proposal; run-to-run variation on the same text is visible (the model
+is at temperature 0 but Ollama's batching is not bit-reproducible), and a
+gold set scored per type is the next measurement, not an optional one.
 
 ## Three things worth knowing before trusting a number
 
@@ -305,13 +338,13 @@ text, and has not yet been measured on hard text.
   justify.
 - **Local open-weight models, not o1 / DeepSeek-R1 / Claude 3.7.** The likeliest
   source of a lower F1 than the paper's.
-- **The relation vocabulary is the graph's, not Figure 2's seven patterns.**
-  The seven are included; so is everything the graph holds between
-  extractable types, and a new name is allowed as a last resort. See "The
-  relation vocabulary" above for why and for what was measured. `reflects`
-  and `solves`, which §3.1.2 names in prose but never patterns or evaluates,
-  are still absent -- a model may of course propose either as a new name if a
-  text states it.
+- **Open vocabularies, not the paper's seven entity types and seven
+  patterns.** Everything the graph and STIX 2.1 know is offered, and a new
+  name is allowed as a last resort; see "The vocabulary" above for why and
+  for what was measured. The paper's seven types are still the subset scored
+  against Table 4. `reflects` and `solves`, which §3.1.2 names in prose but
+  never patterns or evaluates, are not offered -- a model may propose either
+  as a new name if a text states it.
 - **D3FEND ids are names, not `D3-PLA`.** In this graph a defensive technique's
   id is `AccessMediation`, not the short code Figure 3 shows, so no regex can
   find one in prose. Defensive techniques reach their node by embedding

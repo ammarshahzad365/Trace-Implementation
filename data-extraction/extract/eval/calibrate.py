@@ -63,7 +63,7 @@ def retrieve(cfg, handle, rows: list[dict]) -> list[list[dict]]:
     out = []
     for row, vector in zip(rows, vectors):
         merged = sorted(
-            (hit for label in ontology.align_labels(row["type"])
+            (hit for label in ontology.align_labels(ontology.normalise_type(row["type"]) or row["type"])
              for hit in graph.similar(handle, label, vector, k=20)),
             key=lambda hit: hit["cosine"], reverse=True,
         )[:20]

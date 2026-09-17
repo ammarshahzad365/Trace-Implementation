@@ -274,7 +274,7 @@ def extract_file(
         "aligned": proposal["aligned"],
         "near_misses": proposal["near_misses"],
         "dropped": proposal["dropped"],
-        "other": proposal["other"],
+        "new_types": proposal.get("new_types", []),
         "new_relations": proposal.get("new_relations", []),
         "stats": proposal["stats"],
         "commit_url": f"/extract/{job.id}/commit",

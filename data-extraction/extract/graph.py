@@ -121,12 +121,17 @@ def by_exact_name(handle: Session, labels: Sequence[str], name: str) -> dict | N
         rows = handle.run(
             f"MATCH (n:`{assert_identifier(label, 'node label')}`) "
             "WHERE toLower(n.name) = $name "
-            "RETURN n.id AS id, n.name AS name, n.description AS description LIMIT 2",
+            "RETURN n.id AS id, n.name AS name, n.description AS description, "
+            "COUNT { (n)--() } AS degree ORDER BY degree DESC, id ASC LIMIT 5",
             name=wanted,
         ).data()
-        # Two nodes with the same name in one label is a tie we should not
-        # break silently; fall through to the embedding path instead.
-        if len(rows) == 1:
+        # ATT&CK carries the same name in several domains -- `Exfiltration` is
+        # TA0010 (Enterprise) and TA0036 (Mobile), `Lateral Movement` exists
+        # three times. The best-connected one is the Enterprise entry every
+        # time it was checked, and it is the one a report means; the tie was
+        # first left to the embedding path, which has no index for tactics
+        # and so minted a duplicate.
+        if rows:
             return rows[0]
     return None
 
@@ -150,7 +155,8 @@ def by_name_overlap(handle: Session, labels: Sequence[str], name: str) -> list[d
                 f"MATCH (n:`{assert_identifier(label, 'node label')}`) "
                 "WHERE n.name IS NOT NULL AND ("
                 "  $name CONTAINS toLower(n.name) OR toLower(n.name) CONTAINS $name) "
-                "RETURN n.id AS id, n.name AS name, n.description AS description LIMIT 10",
+                "RETURN n.id AS id, n.name AS name, n.description AS description, "
+                "COUNT { (n)--() } AS degree ORDER BY degree DESC, id ASC LIMIT 10",
                 name=wanted,
             ).data()
         )
