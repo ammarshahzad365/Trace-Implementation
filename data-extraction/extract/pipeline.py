@@ -25,7 +25,8 @@ evidence, is what makes the edges traceable.
 Before 2026-09-11 the first half was not a model call at all: the code formed
 every pair that fit one of the paper's seven patterns. That made `group uses
 tool` -- the commonest statement in an APT report, and 1,159 edges in the graph
-already -- unrepresentable. The vocabulary is now the graph's; see ontology.py.
+already -- unrepresentable. The vocabulary is now the graph's and STIX 2.1's;
+see ontology.py.
 
 ## Where the cost goes
 

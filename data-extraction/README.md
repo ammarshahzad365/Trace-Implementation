@@ -20,12 +20,12 @@ SSH tunnel:
 |---|---|---|
 | Neo4j | `bolt://localhost:7687` | `curl localhost:7474` |
 | The ingest API (stage 3) | `http://127.0.0.1:8000` | `curl localhost:8000/health` |
+| Ollama with the models | `http://127.0.0.1:11434` | `curl localhost:11434/api/tags` |
 
 The ingest API must be the committed version (any entity `type` accepted, label
 derived on the fly). The copy on the server was from 1 September until
 2026-09-17 and refused `identity` with a 422; redeploy `data-loading/` if a
 commit ever says "not declared in catalog/labels.py".
-| Ollama with the models | `http://127.0.0.1:11434` | `curl localhost:11434/api/tags` |
 
 Ollama is installed in `~/ollama` as a tarball (no root on this host) and
 started with `~/ollama/start.sh`. The models it needs:
@@ -84,10 +84,12 @@ curl -s localhost:8100/extract -H 'Content-Type: application/json' -d '{
 # {"job_id":"3f2a9c1d8e7b","status_url":"/extract/3f2a9c1d8e7b","status":"queued"}
 ```
 
-`genre` is one of `apt-report`, `repair-notice`, `paper`. It decides which
-entity types the model is offered (section 3.1.1 tailors the ontology per genre)
-and whether the relevance check runs (papers only, section 3.2.2). `source` is
-the document id; it lands on every record produced, as section 3.2.4 requires.
+`genre` is one of `apt-report`, `repair-notice`, `paper`. It names the document
+to the model ("an APT report" primes differently from "a document") and decides
+whether the relevance check runs (papers only, §3.2.2). It no longer narrows the
+types offered -- §3.1.1's per-genre lists went with the open vocabulary.
+`source` is the document id; it lands on every record produced, as §3.2.4
+requires.
 
 **2. Poll.** Extraction takes minutes, so it runs as a job.
 
@@ -169,8 +171,9 @@ Each stage names the section of the paper it comes from.
    each concrete entity (tool, group, CVE, asset) -- or, for the one group in
    a chunk, refer to it as "the actor", "the group" or "it" -- and must
    lexically overlap the description of each paraphrased one (a technique).
-   The code also owns direction: a `used_by` returned as group → vuln is
-   turned round, and a `uses` whose object is an asset becomes `targets`.
+   The code also owns direction: a relation stated backwards is turned round
+   against the known patterns, and a `uses` whose object is an asset,
+   identity, location or vulnerability becomes `targets`.
 6. **Filter** (§3.2.3). Drop nodes that are isolated *and* named only by a
    serial number. Both conditions.
 7. **Standardise** (§3.2.4). Ids minted as `<type>--<uuid5>` from type and
@@ -195,7 +198,7 @@ model is offered, and what it may add:
 | | Offered | May add a new one? |
 |---|---|---|
 | Entity types | the graph's 25 labels + every STIX 2.1 domain object + STIX's report-relevant observables (hash, IP, domain, URL, email, registry key, certificate, mutex …) = **53** | yes -- a new kebab-case name; written, label derived by the loader |
-| Relation types | the graph's 34 + STIX 2.1's relationships + the paper's six = **64** | yes -- a new snake_case name; written, uppercased by the loader |
+| Relation types | the graph's 34 + STIX 2.1's relationships = **60** | yes -- a new snake_case name; written, uppercased by the loader |
 
 The table lives in `extract/ontology.py` (`ENTITY_GROUPS`, `RELATION_GROUPS`),
 each entry with a one-line definition and, for entities, the `type` value the
@@ -204,6 +207,14 @@ loader expects and the labels alignment searches (`tool` searches `Tool` and
 ATT&CK files most actors as intrusion sets). Two names are known but never
 offered: `related_to` (NVD's cross-reference; offered, it became the fallback
 for everything) and `revoked_by` (ATT&CK bookkeeping).
+
+Four names the paper used are **gone** (2026-09-23): `discovers`, `causes`,
+`mitigated_by` and `used_by`. Each was the paper's alone, each named a fact
+STIX already names -- a group that exploits a CVE `targets` it, a mitigation
+`mitigates` -- and none had a single edge in this graph except five written by
+our own ProxyLogon test, since deleted. The paper's other two, `uses` and
+`targets`, are ATT&CK's own vocabulary carrying 20,187 edges, and stay in the
+list as ATT&CK's rather than as the paper's.
 
 The paper's seven types are the subset `PAPER_TYPES`, under their new names
 (`vuln` → `vulnerability`, `group` → `intrusion-set`, `technique` →
@@ -217,11 +228,12 @@ none does -- "do not stretch an existing type; a wrong type is worse than a
 new one". The code then canonicalises: `Threat Actor` → `threat-actor`,
 `backdoor` → `malware`, `Exfiltrates To` → `exfiltrates_to`; whatever is not
 a known name after that is new. Direction is owned by the schema, not the
-model (`APT41 used_by CVE-…` is turned round), and a few definitions are
-enforced in code because the model did not always follow them: `uses` of an
-asset, identity or location is `targets`; an actor that `uses` or `exploits`
-a vulnerability is the paper's `used_by` the other way round; an actor that
-"drops" or "delivers" something `uses` it.
+model (a relation stated backwards is turned round against the known
+patterns), and a few definitions are enforced in code because the model did
+not always follow them: `uses` of an asset, identity, location or
+vulnerability is `targets`; an actor or campaign that `exploits` a
+vulnerability `targets` it, since STIX reserves `exploits` for malware and
+tools; an actor that "drops" or "delivers" something `uses` it.
 
 **Why free strings, not enums.** Both names were JSON-schema enums with an
 `other` escape at first. Under constrained decoding the model never once
@@ -338,13 +350,16 @@ text, and has not yet been measured on hard text.
   justify.
 - **Local open-weight models, not o1 / DeepSeek-R1 / Claude 3.7.** The likeliest
   source of a lower F1 than the paper's.
-- **Open vocabularies, not the paper's seven entity types and seven
-  patterns.** Everything the graph and STIX 2.1 know is offered, and a new
-  name is allowed as a last resort; see "The vocabulary" above for why and
-  for what was measured. The paper's seven types are still the subset scored
-  against Table 4. `reflects` and `solves`, which §3.1.2 names in prose but
-  never patterns or evaluates, are not offered -- a model may propose either
-  as a new name if a text states it.
+- **Open vocabularies, and none of the paper's own relation names.**
+  Everything the graph and STIX 2.1 know is offered, and a new name is
+  allowed as a last resort; see "The vocabulary" above for why and for what
+  was measured. Four of the paper's six relation names were dropped on
+  2026-09-23 as duplicates of STIX's; the two that remain are ATT&CK's.
+  `reflects` and `solves`, which §3.1.2 names in prose but never patterns or
+  evaluates, were never implemented -- a model may propose either as a new
+  name if a text states it. The paper's seven entity types survive only as
+  `PAPER_TYPES`, a subset kept so per-type results stay comparable with
+  Table 4.
 - **D3FEND ids are names, not `D3-PLA`.** In this graph a defensive technique's
   id is `AccessMediation`, not the short code Figure 3 shows, so no regex can
   find one in prose. Defensive techniques reach their node by embedding

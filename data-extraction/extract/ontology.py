@@ -1,7 +1,9 @@
 """The vocabulary an LLM may use, and how it maps onto this graph.
 
 Both lists are **open**, decided 2026-09-17 at the user's direction, replacing
-the paper's closed seven entity types and seven triple patterns:
+the paper's closed seven entity types and seven triple patterns
+(the four relation names that were the paper's alone went on 2026-09-23;
+see `orient`):
 
 - **Entity types** offered to the model are every node label the graph already
   holds (25, from the five structured catalogs), every STIX 2.1 domain object,
@@ -9,9 +11,9 @@ the paper's closed seven entity types and seven triple patterns:
   domains ...). A text naming something none of these describes may be given a
   new type, which is written like any other -- the loader derives a label from
   it (`threat-actor` -> `ThreatActor`) and creates its constraint on the fly.
-- **Relation types** offered are every relationship the graph holds, every
-  STIX 2.1 relationship, and the paper's six; a new name is allowed when none
-  of those describes what the text states.
+- **Relation types** offered are every relationship the graph holds and every
+  STIX 2.1 relationship; a new name is allowed when none of those describes
+  what the text states.
 
 What stays fixed is *how the model names things*: it must copy an offered name
 exactly, or write a new one in the same style. `normalise_type` and
@@ -347,8 +349,8 @@ class Pattern(NamedTuple):
 
 
 # What each relation means, in the prompts' words, with its direction. Three
-# groups, all offered: what a report states most often (the paper's six and
-# STIX's core), the rest of STIX 2.1's relationships, and the structured
+# groups, all offered: what a report states most often (STIX's core and the
+# graph's), the rest of STIX 2.1's relationships, and the structured
 # catalogs' own. Definitions follow each source's meaning. With the catalog
 # types now extractable, the catalog relations can be right between extracted
 # entities, which is why they are offered again after being withdrawn on
@@ -357,7 +359,6 @@ class Pattern(NamedTuple):
 REPORT_RELATIONS: dict[str, str] = {
     "uses": "the subject makes use of the object as an instrument: a group, campaign or actor uses a malware, tool, technique or infrastructure; a malware or tool carries out a technique; a technique is performed with a tool. Never for a victim system -- that is 'targets'",
     "targets": "the group, actor, campaign, malware, tool or technique attacks, is aimed at or compromises the asset, identity, location or vulnerability",
-    "used_by": "the group exploited or leveraged the vulnerability in its operations (vulnerability -> group)",
     "exploits": "the malware or tool exploits the vulnerability",
     "attributed_to": "the campaign or intrusion set is attributed to the group or actor; the actor to a real-world identity",
     "communicates_with": "the malware or infrastructure talks to the infrastructure, address, domain or URL",
@@ -371,15 +372,12 @@ REPORT_RELATIONS: dict[str, str] = {
     "owns": "the group or actor owns the infrastructure",
     "indicates": "the indicator or observable indicates the presence of the malware, tool, campaign, group or infrastructure",
     "mitigates": "the mitigation or course of action reduces or blocks the attack technique, pattern, malware, tool or vulnerability",
-    "mitigated_by": "the mitigation reduces, blocks or fixes the vulnerability (vulnerability -> mitigation)",
     "remediates": "the course of action removes the malware or fixes the vulnerability",
     "counters": "the defensive technique counters or defeats the attack technique",
     "variant_of": "the malware is a variant or new version of the malware",
     "impersonates": "the actor, malware or infrastructure pretends to be the identity, process or file",
     "originates_from": "the group, actor, campaign or malware comes from the location",
     "located_at": "the identity, actor, asset or infrastructure is in the location",
-    "causes": "the vulnerability leads to compromise, damage or impact on the asset",
-    "discovers": "the technique is how the vulnerability was found or identified (not merely exploited)",
     "subtechnique_of": "the technique is a more specific form of the parent technique",
     "authored_by": "the malware or tool was written by the actor or group",
 }
@@ -451,23 +449,9 @@ RELATION_DEFINITIONS: dict[str, str] = {
 }
 
 
-# Exactly the triple patterns Figure 2 evaluates, in the new type names.
-# Section 3.1.2 also lists `reflects` and `solves` in prose, but the paper
-# gives them no pattern and no evaluation anywhere.
-TRIPLE_PATTERNS: tuple[Pattern, ...] = (
-    Pattern("attack-technique", "discovers", "vulnerability"),
-    Pattern("attack-technique", "uses", "tool"),
-    Pattern("vulnerability", "causes", "asset"),
-    Pattern("vulnerability", "mitigated_by", "attack-mitigation"),
-    Pattern("attack-technique", "targets", "asset"),
-    Pattern("vulnerability", "used_by", "intrusion-set"),
-    Pattern("defensive-technique", "targets", "asset"),
-)
-
 # Every (source label, relation, target label) the graph held on 2026-09-11,
 # measured with `MATCH (a)-[r]->(b) RETURN type(r), labels(a)[0],
-# labels(b)[0]`, in type names. Our own test commits (`causes`, `used_by`,
-# technique -> tool `uses`) excluded.
+# labels(b)[0]`, in type names. Our own test commits excluded.
 GRAPH_PATTERNS: tuple[Pattern, ...] = tuple(
     Pattern(s, r, t) for s, r, t in (
         ("attack-technique", "accesses", "artifact"),
@@ -602,7 +586,7 @@ STIX_PATTERNS: tuple[Pattern, ...] = tuple(
     for target in targets
 )
 
-ALL_PATTERNS: frozenset[Pattern] = frozenset((*TRIPLE_PATTERNS, *GRAPH_PATTERNS, *STIX_PATTERNS))
+ALL_PATTERNS: frozenset[Pattern] = frozenset((*GRAPH_PATTERNS, *STIX_PATTERNS))
 
 # A proposed relation name the writer will accept as a Neo4j relationship type
 # once uppercased: snake_case, letters and digits, sensible length.
@@ -633,11 +617,11 @@ def is_known_relation(name: str) -> bool:
 
 
 def typical_patterns(source_type: str | None = None) -> tuple[Pattern, ...]:
-    """The patterns shown to the model as typical directions -- the paper's,
-    the graph's and STIX's, minus the unoffered relation. Optionally only
-    those with this source type."""
+    """The patterns shown to the model as typical directions -- the graph's
+    and STIX's, minus the unoffered relations. Optionally only those with this
+    source type."""
     seen: dict[Pattern, None] = {}
-    for pattern in (*TRIPLE_PATTERNS, *GRAPH_PATTERNS, *STIX_PATTERNS):
+    for pattern in (*GRAPH_PATTERNS, *STIX_PATTERNS):
         if pattern.relation in UNOFFERED_RELATIONS:
             continue
         if source_type is None or pattern.source == source_type:
@@ -649,29 +633,36 @@ def orient(source_type: str, relation: str, target_type: str) -> tuple[bool, str
     """Does a known pattern fix this relation's direction and name?
 
     Returns (swap, relation). The schema, not the model, owns direction:
-    `used_by` is vulnerability -> group, and a model that returns `APT41
-    used_by CVE-2021-44228` has the fact right and the arrow wrong. When the
-    reversed pair is a known pattern and the given one is not, swap.
+    STIX fixes most directions: a model that returns `Mimikatz beacons_to
+    SilverPaw` has the fact right and the arrow wrong. When the reversed pair
+    is a known pattern and the given one is not, swap.
 
     Three retypings on top, because the definitions say so and the model does
-    not always listen: `uses` with an asset, identity or location as object is
-    `targets` ("Volt Typhoon uses Fortinet devices" survived two prompt rules);
-    and a group, actor or campaign that `uses` or `exploits` a vulnerability is
-    the paper's `used_by` the other way round -- the ProxyLogon test returned
-    both `HAFNIUM uses CVE-…` and `CVE-… used_by HAFNIUM` for one sentence,
-    which is one fact under two names until this folds them. `exploits` stays
-    as itself for malware and tools, as STIX defines it.
+    not always listen: `uses` with an asset, identity, location or
+    vulnerability as object is `targets` ("Volt Typhoon uses Fortinet devices"
+    survived two prompt rules, and STIX gives an actor `targets` a
+    vulnerability); an actor or campaign that `exploits` a vulnerability
+    likewise `targets` it, since STIX reserves `exploits` for malware and
+    tools; and an actor that "drops" or "delivers" something `uses` it.
+
+    The paper's `used_by` (vulnerability -> group) used to be the answer to
+    the second of those. It was removed on 2026-09-23 along with `discovers`,
+    `causes` and `mitigated_by`: those four are the paper's alone, name the
+    same facts STIX already names, and nothing in this graph uses them.
+    `uses` and `targets` are ATT&CK's own -- 20,187 edges -- and stay.
     """
-    if relation == "uses" and target_type in {"asset", "identity", "location"}:
+    if relation == "uses" and target_type in {"asset", "identity", "location", "vulnerability"}:
         relation = "targets"
     # STIX defines drops/downloads/delivers for malware, tools and
     # infrastructure; an actor that "deployed" something uses it.
     if relation in {"drops", "downloads", "delivers"} and source_type in {*ACTOR_TYPES, "campaign"}:
         relation = "uses"
-    if relation in {"uses", "exploits"} and target_type == "vulnerability" and source_type in {
+    # STIX reserves `exploits` for malware and tools; an actor or campaign
+    # that exploits a vulnerability targets it.
+    if relation == "exploits" and target_type == "vulnerability" and source_type in {
         *ACTOR_TYPES, "campaign"
     }:
-        return True, "used_by"
+        relation = "targets"
     forward = Pattern(source_type, relation, target_type) in ALL_PATTERNS
     backward = Pattern(target_type, relation, source_type) in ALL_PATTERNS
     return (backward and not forward), relation

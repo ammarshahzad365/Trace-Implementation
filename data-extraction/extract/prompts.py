@@ -279,10 +279,9 @@ def relation_prompt(
     enums use, so it must be unique per entity -- the caller makes it
     `name (type)`.
 
-    The vocabulary is every relation the graph holds, every STIX 2.1
-    relationship and the paper's six, grouped with the common ones first, and
-    the rule that an existing name wins whenever its definition genuinely
-    fits. Typical directions are shown only for the types present in this
+    The vocabulary is every relation the graph holds and every STIX 2.1
+    relationship, grouped with the common ones first, and the rule that an
+    existing name wins whenever its definition genuinely fits. Typical directions are shown only for the types present in this
     chunk, because the full table is 185 rows.
     """
     listed = "\n".join(
@@ -312,7 +311,7 @@ def relation_prompt(
         "it must mention both entities.\n"
         "  - Two entities in the same sentence is not a relationship. The text must connect them.\n"
         "  - Direction matters: 'source' is the subject of the relation as defined above "
-        "('source' used_by 'target' means the vulnerability is the source and the group the target).\n"
+        "('source' beacons_to 'target' means the malware is the source and the server the target).\n"
         "  - A victim system, organisation or place is never 'used'. Something attacked, "
         "exploited or compromised is 'targets'.\n"
         "  - One relationship per pair and type; do not repeat.\n"
