@@ -58,6 +58,13 @@ Port 8100. Interactive docs at `/docs`, like the ingest API.
 
 ## Using it
 
+**The easy way: the review page.** `http://<host>:8100/ui` walks the whole
+thing -- drop a document in, watch it run, look at what the text says, approve
+it, look at what alignment decided to merge, commit. It is one static file
+served by this API (`extract/ui/index.html`), so it is same-origin with the
+endpoints, needs no build step and adds no dependency. Everything below is what
+that page calls.
+
 **The short way: upload a file, get the answer back.**
 
 ```bash
@@ -143,6 +150,43 @@ curl -s localhost:8100/extract/3f2a9c1d8e7b/commit \
 
 The response is the ingest API's own, so `skipped_dangling` and friends mean
 what `data-loading/ingest/README.md` says they mean.
+
+### Reviewing *before* alignment
+
+Add `"review": true` to step 1 and the job stops one stage earlier, at
+`awaiting_review`, holding a **draft** instead of a proposal: the entities the
+document names and the relations it states, each with the sentence that
+justified it, and nothing yet decided about what the graph already holds.
+
+```bash
+curl -s localhost:8100/extract -H 'Content-Type: application/json' \
+  -d '{"text":"...","source":"apt-report-2026-114","review":true}'
+# ... poll until status is awaiting_review, then:
+curl -s localhost:8100/extract/3f2a9c1d8e7b/align \
+  -H 'Content-Type: application/json' \
+  -d '{"drop_entities":["malware:china chopper"],"drop_relations":[]}'
+```
+
+`drop_entities` takes the draft's entity keys (`type:lowercased name`) and
+`drop_relations` its relation ids (`source_key|relation|target_key`). Rejecting
+an entity also rejects every relation touching it, and both are recorded in the
+proposal's `dropped` list as `rejected during review`, so the record still
+accounts for everything the extractor found. Alignment then runs on what
+survived and the job settles at `done` with an ordinary proposal, which
+`/commit` writes as usual.
+
+**Why the gate goes here.** Alignment is the decision that is expensive to
+undo: a wrong merge attaches this document's edges to the wrong existing node
+and nothing downstream complains. Everything before it can be checked against
+the text by reading, without knowing anything about the graph. So the cheap
+check comes first. Keeping the second gate as well is deliberate -- the merges
+themselves, with their cosines and the judge's reasons, are the other thing
+worth a human glance.
+
+A parked job survives an API restart; it is written to disk like any other
+settled state, and only `queued`, `running` and `aligning` are reported as
+`interrupted`. Left at the default `review: false`, both stages run back to
+back exactly as before, and `POST /extract/file` is unchanged.
 
 ## What happens inside
 
@@ -383,7 +427,7 @@ All read from the repo-root `.env` or the environment, environment winning.
 | `OLLAMA_TIMEOUT` | `600` | seconds per model call |
 | `INGEST_URL` | `http://127.0.0.1:8000` | where commits go |
 | `INGEST_API_KEY` | unset | sent as a bearer token on commit if set |
-| `EXTRACT_API_KEY` | unset | required on `POST` endpoints if set |
+| `EXTRACT_API_KEY` | unset | required on every endpoint but `/ui` if set |
 | `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD` / `NEO4J_DATABASE` | as stage 3 | read-only, for alignment |
 
 Finished jobs are kept as JSON under `data-extraction/.cache/jobs/`, so a result

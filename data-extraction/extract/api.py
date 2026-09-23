@@ -1,13 +1,31 @@
 """The HTTP surface: post a document, poll the job, review, then commit.
 
+    GET  /ui                     the review page: upload, approve, align, commit
     GET  /extract/health         is Ollama up, are the models pulled, is the graph reachable
     POST /extract                submit a document; returns a job id straight away
     GET  /extract/jobs           recent jobs, newest first
-    GET  /extract/{job_id}       progress, then the finished proposal
+    GET  /extract/{job_id}       progress, then the draft and the proposal
     POST /extract/file           upload a .txt and get entities + relationships back in one response
+    POST /extract/{job_id}/align align a reviewed draft, minus what you rejected
     POST /extract/{job_id}/commit   write it, optionally minus records you rejected
 
 `/docs` serves the interactive page, the same way the ingest API does.
+
+## Two gates, not one
+
+`POST /extract` with `review: true` stops the job after extraction, at
+`awaiting_review`, holding a **draft**: the entities and relations the document
+states, each with the sentence that justified it, and nothing yet decided about
+what the graph already holds. `POST /extract/{id}/align` then runs alignment on
+whatever survived that review, and the job settles at `done` with a proposal.
+`POST /extract/{id}/commit` writes it.
+
+The order matters. Alignment is the expensive decision to undo -- a wrong merge
+silently attaches this document's edges to the wrong existing node -- so the
+cheap check comes first, on evidence a reader can verify against the text
+without knowing anything about the graph. Left at `review: false`, both stages
+run back to back exactly as they did before, and `POST /extract/file` is
+unchanged.
 
 ## Why committing is a separate call
 
@@ -37,6 +55,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Body, Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from . import graph, jobs, llm, ontology, pipeline
@@ -51,11 +70,18 @@ def require_api_key(authorization: str | None = Header(default=None)) -> None:
     Unset is right for the loopback-plus-SSH-tunnel deployment. Set is right
     anywhere the port is reachable, because this endpoint spends GPU time on
     demand and then writes to the graph.
+
+    Read through `config.setting` rather than `os.environ` alone, so the key can
+    live in `.env` beside `NEO4J_PASSWORD` and `ALIGN_THRESHOLD` instead of
+    having to be exported into whatever shell happened to start the server --
+    which is the difference between a key that is set and a key that is
+    silently absent.
     """
-    import os
     import secrets
 
-    expected = os.environ.get("EXTRACT_API_KEY") or os.environ.get("INGEST_API_KEY")
+    from .config import setting
+
+    expected = setting("EXTRACT_API_KEY") or setting("INGEST_API_KEY")
     if not expected:
         return
     given = (authorization or "").removeprefix("Bearer ")
@@ -78,6 +104,15 @@ class ExtractRequest(BaseModel):
         examples=["apt-report"],
     )
     title: str = Field(default="", description="Used by the relevance check on papers.")
+    review: bool = Field(
+        default=False,
+        description=(
+            "Stop after extraction and wait. The job settles at "
+            "'awaiting_review' with a draft of the entities and relations found; "
+            "POST /extract/{job_id}/align then runs alignment on what you kept. "
+            "Left false, the whole pipeline runs in one pass, as before."
+        ),
+    )
 
 
 @asynccontextmanager
@@ -106,7 +141,29 @@ def _store() -> jobs.JobStore:
     return STATE["jobs"]
 
 
-@app.get("/extract/health")
+UI_FILE = Path(__file__).resolve().parent / "ui" / "index.html"
+
+
+@app.get("/ui", response_class=HTMLResponse, include_in_schema=False)
+def review_page() -> HTMLResponse:
+    """The review page: upload, watch, approve, align, commit.
+
+    Served from this app rather than from a static host so that it is
+    same-origin with the API -- no CORS middleware, no second port, no build
+    step. Read from disk per request rather than cached at import, so the page
+    can be edited on the server without restarting the API.
+
+    Deliberately unauthenticated: it is an empty shell that asks for the key
+    and then calls the endpoints that *are* authenticated. Serving it openly
+    means a wrong key shows a login prompt instead of a blank 401.
+    """
+    try:
+        return HTMLResponse(UI_FILE.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise HTTPException(500, f"the UI file is missing at {UI_FILE}: {exc}") from exc
+
+
+@app.get("/extract/health", dependencies=[Depends(require_api_key)])
 def health() -> dict:
     """Everything this stage depends on, checked separately so failures localise."""
     cfg = _cfg()
@@ -147,12 +204,17 @@ def health() -> dict:
     return report
 
 
-def _start_job(*, text: str, source: str, genre: str, title: str) -> jobs.Job:
+def _start_job(
+    *, text: str, source: str, genre: str, title: str, review: bool = False
+) -> jobs.Job:
     """Validate, then hand the document to the pipeline on a worker thread.
 
     Both submission endpoints go through here, so a document posted as JSON and
     one uploaded as a file run the identical pipeline and land in the same job
     store -- which is what lets `/commit` treat them the same afterwards.
+
+    `review` chooses where the job stops: at `awaiting_review` holding a draft,
+    or at `done` holding a full proposal.
     """
     if genre not in ontology.GENRES:
         raise HTTPException(
@@ -168,6 +230,17 @@ def _start_job(*, text: str, source: str, genre: str, title: str) -> jobs.Job:
 
     def work(job: jobs.Job) -> dict:
         with graph.session(cfg) as handle:
+            if review:
+                draft = pipeline.extract_draft(
+                    cfg,
+                    handle,
+                    text=text,
+                    source=source,
+                    genre=genre,
+                    title=title,
+                    progress=store.progress(job.id),
+                )
+                return draft.as_dict()
             proposal = pipeline.run(
                 cfg,
                 handle,
@@ -179,16 +252,34 @@ def _start_job(*, text: str, source: str, genre: str, title: str) -> jobs.Job:
             )
         return proposal.as_dict()
 
-    return store.submit(source=source, genre=genre, title=title, work=work)
+    return store.submit(
+        source=source,
+        genre=genre,
+        title=title,
+        work=work,
+        field_name="draft" if review else "proposal",
+        settles_at=jobs.AWAITING_REVIEW if review else jobs.DONE,
+    )
 
 
 @app.post("/extract", dependencies=[Depends(require_api_key)], status_code=202)
 def submit(request: ExtractRequest) -> dict:
     """Queue a document. Returns a job id; poll `GET /extract/{job_id}`."""
     job = _start_job(
-        text=request.text, source=request.source, genre=request.genre, title=request.title
+        text=request.text,
+        source=request.source,
+        genre=request.genre,
+        title=request.title,
+        review=request.review,
     )
-    return {"job_id": job.id, "status_url": f"/extract/{job.id}", "status": job.status}
+    return {
+        "job_id": job.id,
+        "status_url": f"/extract/{job.id}",
+        "status": job.status,
+        "next": (
+            f"/extract/{job.id}/align" if request.review else f"/extract/{job.id}/commit"
+        ),
+    }
 
 
 # Files are read as UTF-8 first because that is what nearly every text file is;
@@ -251,7 +342,7 @@ def extract_file(
 
     if settled is None:
         raise HTTPException(500, f"job {job.id} vanished while waiting")
-    if settled.status in (jobs.QUEUED, jobs.RUNNING):
+    if settled.status in jobs.BUSY:
         return {
             "job_id": job.id,
             "status": settled.status,
@@ -281,12 +372,77 @@ def extract_file(
     }
 
 
-@app.get("/extract/jobs")
+class AlignRequest(BaseModel):
+    drop_entities: list[str] = Field(
+        default=[],
+        description="Entity keys to reject, as given in the draft ('malware:china chopper').",
+    )
+    drop_relations: list[str] = Field(
+        default=[],
+        description="Relation ids to reject ('source_key|relation|target_key').",
+    )
+
+
+@app.post("/extract/{job_id}/align", dependencies=[Depends(require_api_key)], status_code=202)
+def align_reviewed(job_id: str, request: AlignRequest = Body(default=AlignRequest())) -> dict:
+    """Stage B: align the draft a reviewer kept, then assemble the proposal.
+
+    Only a job parked at `awaiting_review` can be aligned, and only once --
+    alignment is the step that decides what merges with what, so running it
+    twice on one draft would produce two proposals for one document and leave
+    it ambiguous which one `/commit` should write.
+
+    Rejecting an entity here also rejects every relation touching it; see
+    `pipeline.Draft.without`.
+    """
+    store = _store()
+    job = store.get(job_id)
+    if job is None:
+        raise HTTPException(404, f"no job {job_id!r}")
+    if job.status != jobs.AWAITING_REVIEW or not job.draft:
+        raise HTTPException(
+            409,
+            f"job {job_id} is {job.status}, not {jobs.AWAITING_REVIEW}. Only a job "
+            "submitted with review=true and finished extracting can be aligned.",
+        )
+
+    kept = pipeline.Draft.from_dict(job.draft).without(
+        request.drop_entities, request.drop_relations
+    )
+    if not kept.candidates:
+        raise HTTPException(400, "nothing left to align once the rejections are applied")
+
+    cfg = _cfg()
+    source = job.source
+
+    def work(_: jobs.Job) -> dict:
+        with graph.session(cfg) as handle:
+            proposal = pipeline.align_draft(
+                cfg, handle, kept, source=source, progress=store.progress(job_id)
+            )
+        return proposal.as_dict()
+
+    # The pruned draft is recorded before stage B starts, so the proposal can
+    # always be traced back to exactly what was approved.
+    store.update(job_id, draft=kept.as_dict())
+    store.resume(job_id, work, busy_status=jobs.ALIGNING)
+    return {
+        "job_id": job_id,
+        "status": jobs.ALIGNING,
+        "status_url": f"/extract/{job_id}",
+        "entities_kept": len(kept.candidates),
+        "relations_kept": len(kept.confirmed),
+        "rejected_entities": len(request.drop_entities),
+        "rejected_relations": kept.counts.get("rejected_relations", 0),
+    }
+
+
+@app.get("/extract/jobs", dependencies=[Depends(require_api_key)])
 def recent_jobs(limit: int = 50) -> dict:
     return {"jobs": [job.summary() for job in _store().recent(limit)]}
 
 
-@app.get("/extract/{job_id}")
+@app.get("/extract/{job_id}", dependencies=[Depends(require_api_key)])
 def job_status(job_id: str) -> dict:
     job = _store().get(job_id)
     if job is None:

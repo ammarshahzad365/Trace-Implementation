@@ -1,0 +1,747 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trace extraction review</title>
+<style>
+  :root{
+    --indigo:#2F39A9; --steel:#2E6FA0; --cyan:#49A4BB; --mint:#15D8B3;
+    --ink:#141a2d; --soft:#4c5570; --faint:#7b849c;
+    --ground:#f5f6fa; --surface:#fff; --surface2:#eef1f8;
+    --line:#dde1ee; --line2:#e9ecf5;
+    --warn:#a8610b; --warn-bg:#fdf3e3; --bad:#b0304a; --bad-bg:#fdeef1;
+    --ok:#0c7f6b;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --ink:#e7eaf7; --soft:#a3abc5; --faint:#7b85a3;
+      --ground:#0d1020; --surface:#161a2c; --surface2:#1e2338;
+      --line:#2b3150; --line2:#232842;
+      --indigo:#7d88f0; --steel:#7fb4e2; --cyan:#6ec6da; --mint:#2fdfbd;
+      --warn:#e0a34a; --warn-bg:#2e2410; --bad:#f0879e; --bad-bg:#2f1620;
+      --ok:#2fdfbd;
+      color-scheme:dark;
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--ground); color:var(--ink);
+    font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  .wrap{max-width:1040px;margin:0 auto;padding:0 16px 64px}
+  header{
+    border-bottom:2px solid var(--indigo); padding:22px 0 14px; margin-bottom:22px;
+    display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
+  }
+  h1{font-size:19px;margin:0;letter-spacing:-.01em}
+  h1 span{color:var(--indigo)}
+  .meta{color:var(--faint);font-size:12.5px;margin-left:auto;font-variant-numeric:tabular-nums}
+  h2{font-size:17px;margin:0 0 4px;letter-spacing:-.01em}
+  .lede{color:var(--soft);margin:0 0 18px;font-size:14px;max-width:70ch}
+  section{display:none}
+  section.on{display:block}
+
+  /* steps */
+  .steps{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:22px;font-size:12px}
+  .steps div{
+    padding:4px 11px;border-radius:99px;border:1px solid var(--line);
+    color:var(--faint);background:var(--surface)
+  }
+  .steps div.now{border-color:var(--indigo);color:var(--indigo);font-weight:600}
+  .steps div.done{border-color:var(--mint);color:var(--ok)}
+
+  /* forms */
+  label{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.07em;
+        color:var(--faint);margin:14px 0 5px;font-weight:600}
+  input[type=text],input[type=password],select,textarea{
+    width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:6px;
+    background:var(--surface);color:var(--ink);font:inherit
+  }
+  textarea{min-height:190px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:13px}
+  .row{display:flex;gap:14px;flex-wrap:wrap}
+  .row>div{flex:1 1 220px}
+  button{
+    font:inherit;font-weight:600;padding:10px 20px;border-radius:6px;border:1px solid transparent;
+    background:var(--indigo);color:#fff;cursor:pointer;margin-top:18px
+  }
+  button.ghost{background:transparent;border-color:var(--line);color:var(--soft);font-weight:500}
+  button.go{background:var(--ok);color:#fff}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button+button{margin-left:8px}
+
+  .drop{
+    border:2px dashed var(--line);border-radius:8px;padding:26px;text-align:center;
+    color:var(--faint);background:var(--surface);cursor:pointer
+  }
+  .drop.over{border-color:var(--indigo);color:var(--indigo);background:var(--surface2)}
+  .drop strong{color:var(--ink)}
+
+  /* cards & lists */
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:16px}
+  .card>h3{margin:0 0 10px;font-size:13px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint)}
+  .item{display:flex;gap:11px;padding:9px 0;border-bottom:1px solid var(--line2);align-items:flex-start}
+  .item:last-child{border-bottom:0}
+  .item.off{opacity:.36}
+  .item.off .name{text-decoration:line-through}
+  .item input[type=checkbox]{margin-top:4px;width:16px;height:16px;flex:none;accent-color:var(--indigo)}
+  .body{flex:1;min-width:0}
+  .name{font-weight:600;word-break:break-word}
+  .desc{color:var(--soft);font-size:13.5px;margin-top:2px}
+  .ev{
+    color:var(--soft);font-size:13px;margin-top:5px;padding-left:10px;
+    border-left:2px solid var(--cyan);font-style:italic
+  }
+  .tag{
+    display:inline-block;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;
+    font-weight:700;padding:2px 7px;border-radius:99px;border:1px solid currentColor;
+    margin-left:7px;vertical-align:1px;white-space:nowrap
+  }
+  .tag.type{color:var(--steel);border-color:var(--line);font-weight:600;text-transform:none;
+            letter-spacing:0;font-family:ui-monospace,Consolas,monospace}
+  .tag.new{color:var(--warn);background:var(--warn-bg)}
+  .rel{font-family:ui-monospace,Consolas,monospace;font-size:13.5px;word-break:break-word}
+  .rel b{color:var(--indigo);font-weight:700}
+  .arrow{color:var(--faint)}
+
+  .stats{display:flex;flex-wrap:wrap;gap:1px;background:var(--line);
+         border:1px solid var(--line);border-radius:6px;overflow:hidden;margin-bottom:16px}
+  .stats div{background:var(--surface);padding:8px 13px;flex:1 1 110px}
+  .stats dt{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint)}
+  .stats dd{margin:2px 0 0;font-weight:700;font-variant-numeric:tabular-nums}
+
+  .bar{height:3px;background:var(--line2);border-radius:99px;overflow:hidden;margin:14px 0}
+  .bar i{display:block;height:100%;width:38%;background:var(--indigo);
+         animation:slide 1.4s ease-in-out infinite}
+  @keyframes slide{0%{margin-left:-40%}100%{margin-left:100%}}
+  @media (prefers-reduced-motion:reduce){.bar i{animation:none;width:100%}}
+  .prog{font-family:ui-monospace,Consolas,monospace;font-size:13.5px;color:var(--soft)}
+
+  .err{background:var(--bad-bg);border:1px solid var(--bad);color:var(--bad);
+       padding:11px 14px;border-radius:6px;margin:14px 0;font-size:14px;white-space:pre-wrap}
+  .note{color:var(--faint);font-size:13px;margin-top:10px}
+  .cos{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;color:var(--faint);
+       font-variant-numeric:tabular-nums}
+  .hist{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px}
+  .hist button{margin:0;padding:3px 10px;font-size:12px;font-weight:500;
+               background:var(--surface);border-color:var(--line);color:var(--soft)}
+  .hist button:hover{border-color:var(--indigo);color:var(--indigo)}
+  .actions{position:sticky;bottom:0;background:var(--ground);padding:12px 0;
+           border-top:1px solid var(--line);margin-top:8px}
+  .actions button{margin-top:0}
+  code{font-family:ui-monospace,Consolas,monospace;font-size:.9em;background:var(--surface2);
+       padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Trace <span>extraction review</span></h1>
+  <div class="meta" id="meta"></div>
+</header>
+
+<div class="steps" id="steps">
+  <div data-step="submit">1 · Document</div>
+  <div data-step="running">2 · Extract</div>
+  <div data-step="review">3 · Review what the text says</div>
+  <div data-step="aligning">4 · Align</div>
+  <div data-step="aligned">5 · Review the merges</div>
+  <div data-step="committed">6 · Graph</div>
+</div>
+
+<div id="err"></div>
+
+<!-- ───────────────────────── key ───────────────────────── -->
+<section id="v-key">
+  <h2>API key</h2>
+  <p class="lede">This server is reachable on the network, so the endpoints that spend GPU time or write to the graph need a key. It is kept for this browser tab only.</p>
+  <label for="key">EXTRACT_API_KEY</label>
+  <input type="password" id="key" autocomplete="off" spellcheck="false">
+  <button id="key-go">Continue</button>
+</section>
+
+<!-- ───────────────────────── submit ───────────────────────── -->
+<section id="v-submit">
+  <h2>Add a document</h2>
+  <p class="lede">A plain-text APT report, vendor advisory or paper. Convert PDFs to text first — the pipeline reads prose, not layout.</p>
+
+  <div class="hist" id="hist"></div>
+
+  <div class="drop" id="drop">
+    <strong>Drop a .txt or .md file here</strong><br>or click to choose one
+    <input type="file" id="file" accept=".txt,.md,.text" hidden>
+  </div>
+
+  <label for="text">…or paste the text</label>
+  <textarea id="text" spellcheck="false" placeholder="Paste the document here."></textarea>
+
+  <div class="row">
+    <div>
+      <label for="source">Source id</label>
+      <input type="text" id="source" placeholder="apt-report-2026-114" spellcheck="false">
+    </div>
+    <div>
+      <label for="genre">Genre</label>
+      <select id="genre">
+        <option value="apt-report">APT report</option>
+        <option value="repair-notice">Vendor repair notice / advisory</option>
+        <option value="paper">Academic paper</option>
+      </select>
+    </div>
+    <div>
+      <label for="title">Title <span style="text-transform:none;letter-spacing:0">(papers only)</span></label>
+      <input type="text" id="title" placeholder="Used by the relevance check">
+    </div>
+  </div>
+
+  <button id="submit-go">Extract</button>
+  <p class="note">Stamped on every record produced from this document. The pipeline stops after extraction so you can look before anything is merged.</p>
+</section>
+
+<!-- ───────────────────────── running ───────────────────────── -->
+<section id="v-running">
+  <h2 id="run-head">Extracting</h2>
+  <p class="lede" id="run-lede">Cleansing, chunking, then one model call per chunk to find entities, one to propose relations, and a batch of ten per call to check each against the text.</p>
+  <div class="bar"><i></i></div>
+  <p class="prog" id="prog">starting…</p>
+  <p class="note">A twenty-page report is a few minutes. You can close this tab — the job keeps running and appears in the list on the first screen.</p>
+</section>
+
+<!-- ───────────────────────── gate one ───────────────────────── -->
+<section id="v-review">
+  <h2>What the document says</h2>
+  <p class="lede">Nothing has been compared against the graph yet and nothing has been written. Untick anything wrong; unticking an entity also removes the relations that depend on it.</p>
+  <div class="stats" id="draft-stats"></div>
+  <div class="card"><h3 id="ent-head">Entities</h3><div id="entities"></div></div>
+  <div class="card"><h3 id="rel-head">Relations</h3><div id="relations"></div></div>
+  <div class="card" id="dropped-card" hidden><h3>Dropped by the pipeline</h3><div id="dropped"></div></div>
+  <div class="actions">
+    <button class="go" id="align-go">Approve and align</button>
+    <button class="ghost" id="review-back">Start over</button>
+    <span class="note" id="keep-count" style="margin-left:12px"></span>
+  </div>
+</section>
+
+<!-- ───────────────────────── gate two ───────────────────────── -->
+<section id="v-aligned">
+  <h2>What will be written</h2>
+  <p class="lede">Alignment has decided which entities the graph already holds. A match means the existing node wins and only the new edges are written. Untick anything you do not want.</p>
+  <div class="stats" id="prop-stats"></div>
+  <div class="card" id="aligned-card"><h3 id="aligned-head">Merged into existing nodes</h3><div id="aligned"></div></div>
+  <div class="card" id="new-card"><h3 id="new-head">New nodes</h3><div id="newents"></div></div>
+  <div class="card" id="edge-card"><h3 id="edge-head">Edges</h3><div id="edges"></div></div>
+  <div class="card" id="coined-card" hidden><h3>Names the model coined</h3><div id="coined"></div></div>
+  <div class="actions">
+    <button class="go" id="commit-go">Commit to graph</button>
+    <button class="ghost" id="aligned-back">Start over</button>
+    <span class="note" id="write-count" style="margin-left:12px"></span>
+  </div>
+</section>
+
+<!-- ───────────────────────── done ───────────────────────── -->
+<section id="v-committed">
+  <h2>Written</h2>
+  <p class="lede" id="commit-lede"></p>
+  <div class="stats" id="commit-stats"></div>
+  <button id="again">Add another document</button>
+</section>
+
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const state = {
+  key: "", jobId: null, draft: null, proposal: null,
+  dropEntities: new Set(), dropRelations: new Set(), dropIds: new Set(),
+  timer: null,
+};
+
+/* ───────────────── plumbing ───────────────── */
+
+function show(view){
+  for (const s of document.querySelectorAll("section")) s.classList.toggle("on", s.id === "v-" + view);
+  const order = ["submit","running","review","aligning","aligned","committed"];
+  const at = order.indexOf(view);
+  for (const d of document.querySelectorAll("#steps div")){
+    const i = order.indexOf(d.dataset.step);
+    d.classList.toggle("now", i === at);
+    d.classList.toggle("done", at > -1 && i < at);
+  }
+  $("steps").style.display = view === "key" ? "none" : "";
+}
+
+function fail(message){
+  $("err").innerHTML = "";
+  if (!message) return;
+  const box = document.createElement("div");
+  box.className = "err";
+  box.textContent = message;
+  $("err").appendChild(box);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function api(path, options = {}){
+  const headers = Object.assign({}, options.headers || {});
+  if (state.key) headers["Authorization"] = "Bearer " + state.key;
+  if (options.body) headers["Content-Type"] = "application/json";
+  const response = await fetch(path, Object.assign({}, options, { headers }));
+  if (response.status === 401){
+    show("key");
+    throw new Error("The API key was missing or wrong.");
+  }
+  const raw = await response.text();
+  let data = null;
+  try { data = raw ? JSON.parse(raw) : null; } catch { data = { detail: raw }; }
+  if (!response.ok){
+    const detail = data && data.detail ? data.detail : raw || response.statusText;
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return data;
+}
+
+function stats(target, pairs){
+  target.innerHTML = "";
+  for (const [label, value] of pairs){
+    if (value === undefined || value === null) continue;
+    const cell = document.createElement("div");
+    const dt = document.createElement("dt"); dt.textContent = label;
+    const dd = document.createElement("dd"); dd.textContent = value;
+    cell.append(dt, dd); target.appendChild(cell);
+  }
+}
+
+function tag(text, kind){
+  const span = document.createElement("span");
+  span.className = "tag " + kind;
+  span.textContent = text;
+  return span;
+}
+
+/* ───────────────── submit ───────────────── */
+
+function readFile(file){
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    $("text").value = String(reader.result || "");
+    if (!$("source").value.trim()) $("source").value = file.name.replace(/\.[^.]+$/, "");
+    $("drop").innerHTML = "<strong>" + file.name + "</strong><br>" +
+      $("text").value.length.toLocaleString() + " characters loaded";
+  };
+  reader.readAsText(file);
+}
+
+$("drop").onclick = () => $("file").click();
+$("file").onchange = (e) => readFile(e.target.files[0]);
+["dragenter","dragover"].forEach(n => $("drop").addEventListener(n, e => {
+  e.preventDefault(); $("drop").classList.add("over");
+}));
+["dragleave","drop"].forEach(n => $("drop").addEventListener(n, e => {
+  e.preventDefault(); $("drop").classList.remove("over");
+}));
+$("drop").addEventListener("drop", e => readFile(e.dataTransfer.files[0]));
+
+$("submit-go").onclick = async () => {
+  fail("");
+  const text = $("text").value.trim();
+  const source = $("source").value.trim();
+  if (!text) return fail("Add a document first — drop a file or paste the text.");
+  if (!source) return fail("A source id is required. It is stamped on every record this document produces, so they can be told apart later.");
+  $("submit-go").disabled = true;
+  try {
+    const started = await api("/extract", {
+      method: "POST",
+      body: JSON.stringify({ text, source, genre: $("genre").value, title: $("title").value.trim(), review: true }),
+    });
+    state.jobId = started.job_id;
+    $("meta").textContent = "job " + started.job_id + " · " + source;
+    poll("extract");
+  } catch (e) { fail(e.message); }
+  finally { $("submit-go").disabled = false; }
+};
+
+/* ───────────────── polling ───────────────── */
+
+function poll(phase){
+  $("run-head").textContent = phase === "align" ? "Aligning" : "Extracting";
+  $("run-lede").textContent = phase === "align"
+    ? "Embedding each entity and searching the graph for the twenty nearest of the same type, then asking the model which — if any — is the same thing."
+    : "Cleansing, chunking, then one model call per chunk to find entities, one to propose relations, and a batch of ten per call to check each against the text.";
+  show("running");
+  clearInterval(state.timer);
+  state.timer = setInterval(tick, 1500);
+  tick();
+}
+
+async function tick(){
+  try {
+    const job = await api("/extract/" + state.jobId);
+    $("prog").textContent = job.progress || job.status;
+    if (job.status === "awaiting_review"){
+      clearInterval(state.timer);
+      state.draft = job.draft;
+      state.dropEntities.clear(); state.dropRelations.clear();
+      renderDraft();
+    } else if (job.status === "done"){
+      clearInterval(state.timer);
+      state.proposal = job.proposal;
+      state.dropIds.clear();
+      renderProposal();
+    } else if (job.status === "committed"){
+      // Reopened from the history strip after it was already written. Show it
+      // read-only rather than polling a job that will never change again.
+      clearInterval(state.timer);
+      state.proposal = job.proposal;
+      state.dropIds.clear();
+      renderProposal();
+      $("commit-go").disabled = true;
+      $("write-count").textContent = "already committed on " + (job.updated_at || "").replace("T", " ");
+    } else if (["failed","skipped","interrupted"].includes(job.status)){
+      clearInterval(state.timer);
+      show("submit");
+      fail(job.status === "skipped"
+        ? "The relevance check rejected this paper: " + (job.error || "")
+        : "The job " + job.status + ": " + (job.error || "no reason recorded"));
+    }
+  } catch (e){ clearInterval(state.timer); fail(e.message); }
+}
+
+/* ───────────────── gate one ───────────────── */
+
+function renderDraft(){
+  const draft = state.draft, counts = draft.counts || {};
+  stats($("draft-stats"), [
+    ["Characters", (counts.characters || 0).toLocaleString()],
+    ["Chunks", counts.chunks],
+    ["Entities", draft.entities.length],
+    ["Relations proposed", counts.relations_proposed],
+    ["Relations confirmed", draft.relations.length],
+  ]);
+
+  const entities = $("entities"); entities.innerHTML = "";
+  const byType = {};
+  for (const e of draft.entities) (byType[e.type] = byType[e.type] || []).push(e);
+  for (const type of Object.keys(byType).sort()){
+    for (const entity of byType[type]){
+      const row = document.createElement("div");
+      row.className = "item"; row.dataset.key = entity.key;
+      const box = document.createElement("input");
+      box.type = "checkbox"; box.checked = true;
+      box.onchange = () => {
+        if (box.checked) state.dropEntities.delete(entity.key);
+        else state.dropEntities.add(entity.key);
+        paintDraft();
+      };
+      const body = document.createElement("div"); body.className = "body";
+      const name = document.createElement("div"); name.className = "name";
+      name.textContent = entity.name;
+      name.appendChild(tag(entity.type, "type"));
+      if (entity.new_type) name.appendChild(tag("new type", "new"));
+      body.appendChild(name);
+      if (entity.description){
+        const d = document.createElement("div"); d.className = "desc";
+        d.textContent = entity.description; body.appendChild(d);
+      }
+      row.append(box, body); entities.appendChild(row);
+    }
+  }
+  $("ent-head").textContent = "Entities (" + draft.entities.length + ")";
+
+  const relations = $("relations"); relations.innerHTML = "";
+  for (const relation of draft.relations){
+    const row = document.createElement("div");
+    row.className = "item";
+    row.dataset.rel = relation.id;
+    row.dataset.from = relation.source_key;
+    row.dataset.to = relation.target_key;
+    const box = document.createElement("input");
+    box.type = "checkbox"; box.checked = true;
+    box.onchange = () => {
+      if (box.checked) state.dropRelations.delete(relation.id);
+      else state.dropRelations.add(relation.id);
+      paintDraft();
+    };
+    const body = document.createElement("div"); body.className = "body";
+    const line = document.createElement("div"); line.className = "rel";
+    line.append(relation.source_name + " ");
+    const arrow = document.createElement("span"); arrow.className = "arrow"; arrow.textContent = "—";
+    const verb = document.createElement("b"); verb.textContent = relation.relation;
+    const arrow2 = document.createElement("span"); arrow2.className = "arrow"; arrow2.textContent = "→ ";
+    line.append(arrow, verb, arrow2, relation.target_name);
+    if (relation.new_relation) line.appendChild(tag("new relation", "new"));
+    body.appendChild(line);
+    if (relation.evidence){
+      const q = document.createElement("div"); q.className = "ev";
+      q.textContent = "“" + relation.evidence + "”"; body.appendChild(q);
+    }
+    row.append(box, body); relations.appendChild(row);
+  }
+  $("rel-head").textContent = "Relations (" + draft.relations.length + ")";
+  if (!draft.relations.length) relations.innerHTML =
+    '<p class="note">No relation survived verification. The entities can still be written; they will simply arrive unconnected.</p>';
+
+  const dropped = draft.dropped || [];
+  $("dropped-card").hidden = !dropped.length;
+  $("dropped").innerHTML = "";
+  for (const d of dropped){
+    const row = document.createElement("div"); row.className = "item";
+    const body = document.createElement("div"); body.className = "body";
+    const name = document.createElement("div"); name.className = "name";
+    name.textContent = d.name; name.appendChild(tag(d.type, "type"));
+    const why = document.createElement("div"); why.className = "desc"; why.textContent = d.why;
+    body.append(name, why); row.appendChild(body); $("dropped").appendChild(row);
+  }
+
+  paintDraft();
+  show("review");
+}
+
+/* Grey out relations whose endpoints were unticked, so the cascade is visible
+   before it is applied rather than surprising afterwards. */
+function paintDraft(){
+  for (const row of document.querySelectorAll("#entities .item"))
+    row.classList.toggle("off", state.dropEntities.has(row.dataset.key));
+  let relationsKept = 0;
+  for (const row of document.querySelectorAll("#relations .item")){
+    const orphaned = state.dropEntities.has(row.dataset.from) || state.dropEntities.has(row.dataset.to);
+    const unticked = state.dropRelations.has(row.dataset.rel);
+    row.classList.toggle("off", orphaned || unticked);
+    const box = row.querySelector("input");
+    box.disabled = orphaned;
+    if (!orphaned && !unticked) relationsKept++;
+  }
+  const entitiesKept = state.draft.entities.length - state.dropEntities.size;
+  $("keep-count").textContent = entitiesKept + " entities and " + relationsKept + " relations will be aligned";
+  $("align-go").disabled = entitiesKept === 0;
+}
+
+$("align-go").onclick = async () => {
+  fail("");
+  $("align-go").disabled = true;
+  try {
+    await api("/extract/" + state.jobId + "/align", {
+      method: "POST",
+      body: JSON.stringify({
+        drop_entities: [...state.dropEntities],
+        drop_relations: [...state.dropRelations],
+      }),
+    });
+    poll("align");
+  } catch (e){ fail(e.message); $("align-go").disabled = false; }
+};
+
+/* ───────────────── gate two ───────────────── */
+
+function renderProposal(){
+  const p = state.proposal, s = p.stats || {};
+  stats($("prop-stats"), [
+    ["New nodes", p.entities.length],
+    ["Merged", p.aligned.length],
+    ["Edges", p.relationships.length],
+    ["By identifier", s.aligned_by_identifier],
+    ["By embedding", s.aligned_by_embedding],
+    ["θ", s.threshold],
+  ]);
+
+  const aligned = $("aligned"); aligned.innerHTML = "";
+  for (const a of p.aligned){
+    const row = document.createElement("div"); row.className = "item";
+    const body = document.createElement("div"); body.className = "body";
+    const name = document.createElement("div"); name.className = "name";
+    name.textContent = a.name + "  →  " + (a.matched_name || a.matched_id);
+    name.appendChild(tag(a.type, "type"));
+    body.appendChild(name);
+    const how = document.createElement("div"); how.className = "cos";
+    how.textContent = "by " + a.method + (a.cosine != null ? " · cosine " + a.cosine : "");
+    body.appendChild(how);
+    if (a.reason){
+      const why = document.createElement("div"); why.className = "desc"; why.textContent = a.reason;
+      body.appendChild(why);
+    }
+    row.appendChild(body); aligned.appendChild(row);
+  }
+  $("aligned-head").textContent = "Merged into existing nodes (" + p.aligned.length + ")";
+  $("aligned-card").hidden = !p.aligned.length;
+
+  const misses = {};
+  for (const m of (p.near_misses || [])) misses[m.name + "\u0000" + m.type] = m;
+  const fresh = $("newents"); fresh.innerHTML = "";
+  for (const entity of p.entities){
+    const row = document.createElement("div"); row.className = "item"; row.dataset.id = entity.id;
+    const box = document.createElement("input");
+    box.type = "checkbox"; box.checked = true;
+    box.onchange = () => { toggleDrop(box, entity.id); };
+    const body = document.createElement("div"); body.className = "body";
+    const name = document.createElement("div"); name.className = "name";
+    name.textContent = entity.name; name.appendChild(tag(entity.type, "type"));
+    body.appendChild(name);
+    if (entity.description){
+      const d = document.createElement("div"); d.className = "desc";
+      d.textContent = entity.description; body.appendChild(d);
+    }
+    const miss = misses[entity.name + "\u0000" + entity.type];
+    if (miss && miss.closest_name){
+      const near = document.createElement("div"); near.className = "cos";
+      near.textContent = "nearest existing: " + miss.closest_name +
+        (miss.cosine != null ? " at " + miss.cosine : "") + " — below θ, so treated as new";
+      body.appendChild(near);
+    }
+    row.append(box, body); fresh.appendChild(row);
+  }
+  $("new-head").textContent = "New nodes (" + p.entities.length + ")";
+  $("new-card").hidden = !p.entities.length;
+
+  const edges = $("edges"); edges.innerHTML = "";
+  const names = {};
+  for (const e of p.entities) names[e.id] = e.name;
+  for (const a of p.aligned) names[a.matched_id] = a.matched_name || a.name;
+  for (const edge of p.relationships){
+    const row = document.createElement("div"); row.className = "item"; row.dataset.id = edge.id;
+    const box = document.createElement("input");
+    box.type = "checkbox"; box.checked = true;
+    box.onchange = () => { toggleDrop(box, edge.id); };
+    const body = document.createElement("div"); body.className = "body";
+    const line = document.createElement("div"); line.className = "rel";
+    const verb = document.createElement("b"); verb.textContent = edge.relationship_type;
+    line.append((names[edge.source_ref] || edge.source_ref) + " ");
+    const a1 = document.createElement("span"); a1.className = "arrow"; a1.textContent = "—";
+    const a2 = document.createElement("span"); a2.className = "arrow"; a2.textContent = "→ ";
+    line.append(a1, verb, a2, names[edge.target_ref] || edge.target_ref);
+    body.appendChild(line);
+    if (edge.evidence){
+      const q = document.createElement("div"); q.className = "ev";
+      q.textContent = "“" + edge.evidence + "”"; body.appendChild(q);
+    }
+    row.append(box, body); edges.appendChild(row);
+  }
+  $("edge-head").textContent = "Edges (" + p.relationships.length + ")";
+  $("edge-card").hidden = !p.relationships.length;
+
+  const coined = [...(p.new_types || []).map(t => ["type", t.type, t.count, (t.examples || []).join(", ")]),
+                  ...(p.new_relations || []).map(r => ["relation", r.relation, r.count, r.example || ""])];
+  $("coined-card").hidden = !coined.length;
+  $("coined").innerHTML = "";
+  for (const [kind, name, count, detail] of coined){
+    const row = document.createElement("div"); row.className = "item";
+    const body = document.createElement("div"); body.className = "body";
+    const head = document.createElement("div"); head.className = "name";
+    head.textContent = name; head.appendChild(tag("new " + kind, "new"));
+    const meta = document.createElement("div"); meta.className = "desc";
+    meta.textContent = count + "×" + (detail ? " · " + detail : "");
+    body.append(head, meta); row.appendChild(body); $("coined").appendChild(row);
+  }
+
+  paintProposal();
+  show("aligned");
+}
+
+function toggleDrop(box, id){
+  if (box.checked) state.dropIds.delete(id); else state.dropIds.add(id);
+  paintProposal();
+}
+
+/* An edge whose endpoint is unticked cannot be written, so show that here too
+   rather than letting the server silently drop it. */
+function paintProposal(){
+  const p = state.proposal;
+  const goneEntities = new Set([...state.dropIds].filter(id => p.entities.some(e => e.id === id)));
+  let edgesKept = 0;
+  for (const row of document.querySelectorAll("#newents .item"))
+    row.classList.toggle("off", state.dropIds.has(row.dataset.id));
+  for (const row of document.querySelectorAll("#edges .item")){
+    const edge = p.relationships.find(r => r.id === row.dataset.id);
+    const orphaned = goneEntities.has(edge.source_ref) || goneEntities.has(edge.target_ref);
+    const unticked = state.dropIds.has(edge.id);
+    row.classList.toggle("off", orphaned || unticked);
+    row.querySelector("input").disabled = orphaned;
+    if (!orphaned && !unticked) edgesKept++;
+  }
+  const entitiesKept = p.entities.length - goneEntities.size;
+  $("write-count").textContent = entitiesKept + " nodes and " + edgesKept + " edges will be written";
+  $("commit-go").disabled = entitiesKept === 0 && edgesKept === 0;
+}
+
+$("commit-go").onclick = async () => {
+  fail("");
+  $("commit-go").disabled = true;
+  try {
+    const result = await api("/extract/" + state.jobId + "/commit", {
+      method: "POST",
+      body: JSON.stringify({ drop_ids: [...state.dropIds] }),
+    });
+    const written = result.written || {};
+    const nodes = written.entities || {}, edges = written.relationships || {};
+    const labels = nodes.new_labels || [];
+    $("commit-lede").textContent =
+      "Committed through the ingest API on :8000. Entities that aligned to an existing node were not rewritten — only their new edges — so no existing node lost its properties."
+      + (labels.length ? " New labels created: " + labels.join(", ") + "." : "");
+    stats($("commit-stats"), [
+      ["Nodes sent", result.entities_sent],
+      ["Nodes written", nodes.written],
+      ["Edges sent", result.relationships_sent],
+      ["Edges written", edges.written],
+      ["Skipped dangling", edges.skipped_dangling],
+      ["Rejected by you", result.dropped_by_request],
+    ]);
+    show("committed");
+  } catch (e){ fail(e.message); $("commit-go").disabled = false; }
+};
+
+/* ───────────────── history & reset ───────────────── */
+
+async function loadHistory(){
+  try {
+    const data = await api("/extract/jobs?limit=12");
+    const strip = $("hist"); strip.innerHTML = "";
+    const interesting = data.jobs.filter(j =>
+      ["awaiting_review","done","aligning","running","queued","committed"].includes(j.status));
+    if (!interesting.length) return;
+    const label = document.createElement("span");
+    label.className = "note"; label.style.alignSelf = "center";
+    label.textContent = "Reopen:";
+    strip.appendChild(label);
+    for (const job of interesting.slice(0, 8)){
+      const button = document.createElement("button");
+      button.textContent = job.source + " · " + job.status.replace("_", " ");
+      button.onclick = () => { state.jobId = job.id; $("meta").textContent = "job " + job.id + " · " + job.source; poll("extract"); };
+      strip.appendChild(button);
+    }
+  } catch { /* the key screen will handle it */ }
+}
+
+function reset(){
+  clearInterval(state.timer);
+  state.jobId = null; state.draft = null; state.proposal = null;
+  state.dropEntities.clear(); state.dropRelations.clear(); state.dropIds.clear();
+  $("meta").textContent = "";
+  $("align-go").disabled = false; $("commit-go").disabled = false;
+  fail(""); show("submit"); loadHistory();
+}
+$("again").onclick = () => { $("text").value = ""; $("source").value = "";
+  $("drop").innerHTML = "<strong>Drop a .txt or .md file here</strong><br>or click to choose one"; reset(); };
+$("review-back").onclick = reset;
+$("aligned-back").onclick = reset;
+
+$("key-go").onclick = () => {
+  state.key = $("key").value.trim();
+  try { sessionStorage.setItem("trace-key", state.key); } catch { /* private window */ }
+  fail(""); reset();
+};
+$("key").addEventListener("keydown", e => { if (e.key === "Enter") $("key-go").click(); });
+
+try { state.key = sessionStorage.getItem("trace-key") || ""; } catch { state.key = ""; }
+show("submit");
+loadHistory().then(() => {
+  api("/extract/health").then(h => {
+    const bits = [];
+    if (h.nodes) bits.push(h.nodes.toLocaleString() + " nodes");
+    if (h.config) bits.push(h.config.split(" ")[0].replace("extract=", ""));
+    if (h.models_missing && h.models_missing.length) bits.push("MISSING: " + h.models_missing.join(", "));
+    $("meta").textContent = bits.join(" · ");
+  }).catch(() => {});
+});
+</script>
+</body>
+</html>

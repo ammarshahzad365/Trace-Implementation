@@ -36,11 +36,21 @@ from typing import Callable
 
 QUEUED = "queued"
 RUNNING = "running"
+#: Stage A finished and the draft is waiting for a human. Settled, not busy:
+#: it can sit here for hours, and it must survive an API restart.
+AWAITING_REVIEW = "awaiting_review"
+#: Stage B is running, on a job that was reviewed.
+ALIGNING = "aligning"
 DONE = "done"
 FAILED = "failed"
 SKIPPED = "skipped"
 COMMITTED = "committed"
 INTERRUPTED = "interrupted"
+
+#: Statuses where a worker thread is meant to exist. A job found in one of
+#: these after a restart was orphaned by it -- see `_load`. Everything else is
+#: settled and gets written to disk on every update.
+BUSY = (QUEUED, RUNNING, ALIGNING)
 
 
 def _now() -> str:
@@ -58,15 +68,19 @@ class Job:
     progress: str = "waiting for a worker"
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
+    #: Stage A's output, once it exists. Kept after alignment too, so the
+    #: review that produced a proposal stays inspectable.
+    draft: dict | None = None
     proposal: dict | None = None
     commit_result: dict | None = None
     error: str | None = None
 
     def summary(self) -> dict:
-        """What `GET /extract/jobs` lists -- everything but the proposal itself."""
+        """What `GET /extract/jobs` lists -- everything but the bulky parts."""
         data = asdict(self)
         proposal = data.pop("proposal")
-        data["stats"] = (proposal or {}).get("stats")
+        draft = data.pop("draft")
+        data["stats"] = (proposal or {}).get("stats") or (draft or {}).get("counts")
         return data
 
 
@@ -101,28 +115,74 @@ class JobStore:
         except (OSError, json.JSONDecodeError):
             return None
         job = Job(**data)
-        # A job recorded as running cannot be running: this process has no thread
-        # for it, so the API was restarted underneath it.
-        if job.status in (QUEUED, RUNNING):
+        # A job recorded as busy cannot be busy: this process has no thread for
+        # it, so the API was restarted underneath it. `awaiting_review` is
+        # deliberately not in that set -- parking across a restart is the point
+        # of persisting it, and its draft is complete.
+        if job.status in BUSY:
             job.status = INTERRUPTED
             job.error = "the API restarted while this job was running; submit it again"
         return job
 
     # -- lifecycle ---------------------------------------------------------
 
-    def submit(self, *, source: str, genre: str, title: str, work: Callable[[Job], dict]) -> Job:
-        """Register a job and hand `work` to the pool. Returns immediately."""
+    def submit(
+        self,
+        *,
+        source: str,
+        genre: str,
+        title: str,
+        work: Callable[[Job], dict],
+        field_name: str = "proposal",
+        settles_at: str = DONE,
+    ) -> Job:
+        """Register a job and hand `work` to the pool. Returns immediately.
+
+        `field_name` and `settles_at` are what let one store carry both halves
+        of the pipeline: stage A settles at `awaiting_review` with its output in
+        `draft`, stage B at `done` with its output in `proposal`.
+        """
         job = Job(id=uuid.uuid4().hex[:12], source=source, genre=genre, title=title)
         with self._lock:
             self._jobs[job.id] = job
         self._persist(job)
-        self._pool.submit(self._run, job, work)
+        self._pool.submit(self._run, job, work, RUNNING, field_name, settles_at)
         return job
 
-    def _run(self, job: Job, work: Callable[[Job], dict]) -> None:
-        self.update(job.id, status=RUNNING, progress="starting")
+    def resume(
+        self,
+        job_id: str,
+        work: Callable[[Job], dict],
+        *,
+        busy_status: str = ALIGNING,
+        field_name: str = "proposal",
+        settles_at: str = DONE,
+    ) -> Job | None:
+        """Run more work on a job that already exists.
+
+        Stage B is not a new job: it belongs to the document that was already
+        extracted, and keeping it on the same id is what lets `/commit` and the
+        review page follow one thing from upload to graph.
+        """
+        job = self.get(job_id)
+        if job is None:
+            return None
+        with self._lock:
+            self._jobs[job_id] = job
+        self._pool.submit(self._run, job, work, busy_status, field_name, settles_at)
+        return job
+
+    def _run(
+        self,
+        job: Job,
+        work: Callable[[Job], dict],
+        busy_status: str = RUNNING,
+        field_name: str = "proposal",
+        settles_at: str = DONE,
+    ) -> None:
+        self.update(job.id, status=busy_status, progress="starting")
         try:
-            proposal = work(job)
+            produced = work(job)
         except Exception as exc:  # noqa: BLE001 -- recorded on the job, not raised into the pool
             # The traceback goes to the job rather than to a log nobody reads:
             # whoever submitted the document is the one who needs to see why it
@@ -135,7 +195,7 @@ class JobStore:
                 traceback_text=traceback.format_exc(),
             )
             return
-        self.update(job.id, status=DONE, progress="finished", proposal=proposal)
+        self.update(job.id, status=settles_at, progress="finished", **{field_name: produced})
 
     def update(self, job_id: str, *, traceback_text: str | None = None, **fields) -> None:
         with self._lock:
@@ -152,8 +212,9 @@ class JobStore:
             )
         # Persist only settled states: progress ticks several times a second and
         # rewriting a megabyte of proposal each time would cost more than the
-        # extraction.
-        if snapshot.status not in (QUEUED, RUNNING):
+        # extraction. `awaiting_review` is settled and so is written -- that is
+        # what lets a parked review survive a restart.
+        if snapshot.status not in BUSY:
             self._persist(snapshot)
 
     def progress(self, job_id: str) -> Callable[[str], None]:
@@ -183,7 +244,7 @@ class JobStore:
         deadline = time.monotonic() + timeout
         while True:
             job = self.get(job_id)
-            if job is None or job.status not in (QUEUED, RUNNING):
+            if job is None or job.status not in BUSY:
                 return job
             if time.monotonic() >= deadline:
                 return job

@@ -41,7 +41,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from neo4j import Session
 
@@ -83,6 +83,129 @@ class Proposal:
             "new_relations": self.new_relations,
             "stats": self.stats,
         }
+
+
+@dataclass
+class Draft:
+    """What the text says, before we ask what the graph already knows.
+
+    Stage A stops here so the extraction can be reviewed *before* alignment
+    merges anything. Alignment is the step that is expensive to undo -- a wrong
+    merge silently attaches a report's edges to the wrong existing node -- so
+    the cheaper decision (is this entity real, does this sentence say this)
+    happens first, on evidence a reader can check without knowing the graph.
+
+    It is a dataclass rather than a tuple because it has to survive an API
+    restart: `as_dict` is what the job store persists and what the review page
+    renders, and `from_dict` is what stage B resumes from.
+    """
+
+    candidates: dict[str, Candidate]
+    confirmed: list[tuple[str, ontology.Pattern, str, str]] = field(default_factory=list)
+    dropped: list[dict] = field(default_factory=list)
+    counts: dict = field(default_factory=dict)
+
+    @staticmethod
+    def relation_id(source_key: str, relation: str, target_key: str) -> str:
+        """Stable across a reload, so a half-finished review is not lost."""
+        return f"{source_key}|{relation}|{target_key}"
+
+    def as_dict(self) -> dict:
+        """The review page's whole input. Flags are computed here rather than
+        in the page, so the page needs to know nothing about the ontology."""
+        return {
+            "entities": [
+                {
+                    "key": key,
+                    "type": candidate.paper_type,
+                    "name": candidate.name,
+                    "description": candidate.description,
+                    "new_type": not ontology.is_known_type(candidate.paper_type),
+                }
+                for key, candidate in self.candidates.items()
+            ],
+            "relations": [
+                {
+                    "id": self.relation_id(source_key, pattern.relation, target_key),
+                    "source_key": source_key,
+                    "source_name": self.candidates[source_key].name,
+                    "source_type": pattern.source,
+                    "relation": pattern.relation,
+                    "target_key": target_key,
+                    "target_name": self.candidates[target_key].name,
+                    "target_type": pattern.target,
+                    "evidence": evidence,
+                    "new_relation": not ontology.is_known_relation(pattern.relation),
+                }
+                for source_key, pattern, target_key, evidence in self.confirmed
+                if source_key in self.candidates and target_key in self.candidates
+            ],
+            "dropped": self.dropped,
+            "counts": self.counts,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Draft":
+        candidates = {
+            row["key"]: Candidate(
+                paper_type=row["type"], name=row["name"], description=row.get("description", "")
+            )
+            for row in data.get("entities", [])
+        }
+        confirmed = [
+            (
+                row["source_key"],
+                ontology.Pattern(row["source_type"], row["relation"], row["target_type"]),
+                row["target_key"],
+                row.get("evidence", ""),
+            )
+            for row in data.get("relations", [])
+        ]
+        return cls(
+            candidates=candidates,
+            confirmed=confirmed,
+            dropped=list(data.get("dropped", [])),
+            counts=dict(data.get("counts", {})),
+        )
+
+    def without(self, entity_keys: Iterable[str], relation_ids: Iterable[str]) -> "Draft":
+        """The draft minus what the reviewer rejected.
+
+        Dropping an entity drops every relation that touches it, for the same
+        reason `api.commit` does: an edge to a node that will never be written
+        dangles. Rejected entities are recorded in `dropped` so the proposal
+        still accounts for everything the extractor found.
+        """
+        unwanted_entities = set(entity_keys)
+        unwanted_relations = set(relation_ids)
+        kept = {
+            key: candidate
+            for key, candidate in self.candidates.items()
+            if key not in unwanted_entities
+        }
+        confirmed = [
+            row
+            for row in self.confirmed
+            if row[0] in kept
+            and row[2] in kept
+            and self.relation_id(row[0], row[1].relation, row[2]) not in unwanted_relations
+        ]
+        dropped = list(self.dropped) + [
+            {
+                "name": self.candidates[key].name,
+                "type": self.candidates[key].paper_type,
+                "why": "rejected during review",
+            }
+            for key in unwanted_entities
+            if key in self.candidates
+        ]
+        counts = {
+            **self.counts,
+            "candidates": len(kept),
+            "rejected_entities": len(unwanted_entities & set(self.candidates)),
+            "rejected_relations": len(self.confirmed) - len(confirmed),
+        }
+        return Draft(candidates=kept, confirmed=confirmed, dropped=dropped, counts=counts)
 
 
 def _extract_nodes(
@@ -489,17 +612,25 @@ def _validate_pairs(
     return confirmed
 
 
-def run(
+def extract_draft(
     cfg: Settings,
     handle: Session,
     *,
     text: str,
-    source: str,
+    source: str = "",
     genre: str,
     title: str = "",
     progress: Progress | None = None,
-) -> Proposal:
-    """Extract, validate, filter, align. Returns a proposal; writes nothing."""
+) -> Draft:
+    """Stage A: cleanse, screen, chunk, extract, validate, filter.
+
+    Everything the *document* says, and nothing about what the graph already
+    holds. Reads the graph twice on the way -- identifier lookups and the
+    retrieval repository -- but writes nothing and merges nothing.
+
+    `source` is accepted and unused so that both halves take the same
+    arguments; it is stamped on records in `_assemble`, after alignment.
+    """
 
     def step(message: str) -> None:
         if progress:
@@ -560,18 +691,9 @@ def run(
     # Nothing needs re-filtering here: a dropped key was by definition absent
     # from `connected`, so no confirmed relation can refer to it.
 
-    step("aligning")
-    alignment = align.align(cfg, handle, list(merged.values()), progress=progress)
-    final_id = {
-        decision.candidate.key: decision.final_id for decision in alignment.decisions
-    }
-
-    return _assemble(
-        cfg,
-        source=source,
-        alignment=alignment,
+    return Draft(
+        candidates=merged,
         confirmed=confirmed,
-        final_id=final_id,
         dropped=dropped,
         counts={
             "characters": len(body),
@@ -581,6 +703,58 @@ def run(
             "relations_unnamed": unnamed,
         },
     )
+
+
+def align_draft(
+    cfg: Settings,
+    handle: Session,
+    draft: Draft,
+    *,
+    source: str,
+    progress: Progress | None = None,
+) -> Proposal:
+    """Stage B: decide new-or-existing for every candidate, then assemble.
+
+    Takes a `Draft` rather than a document, so it can run minutes or hours
+    after stage A, on a draft a reviewer has pruned.
+    """
+    if progress:
+        progress("aligning")
+    alignment = align.align(cfg, handle, list(draft.candidates.values()), progress=progress)
+    final_id = {
+        decision.candidate.key: decision.final_id for decision in alignment.decisions
+    }
+
+    return _assemble(
+        cfg,
+        source=source,
+        alignment=alignment,
+        confirmed=draft.confirmed,
+        final_id=final_id,
+        dropped=draft.dropped,
+        counts=draft.counts,
+    )
+
+
+def run(
+    cfg: Settings,
+    handle: Session,
+    *,
+    text: str,
+    source: str,
+    genre: str,
+    title: str = "",
+    progress: Progress | None = None,
+) -> Proposal:
+    """Both stages back to back -- the unreviewed path, unchanged.
+
+    `POST /extract` without `review`, and `POST /extract/file`, still go through
+    here and still behave exactly as they did before the split.
+    """
+    draft = extract_draft(
+        cfg, handle, text=text, source=source, genre=genre, title=title, progress=progress
+    )
+    return align_draft(cfg, handle, draft, source=source, progress=progress)
 
 
 def _assemble(
