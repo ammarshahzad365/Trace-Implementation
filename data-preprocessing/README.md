@@ -1,119 +1,101 @@
 # Data Preprocessing (stage 2)
 
-This folder turns the raw downloads from [`../data-acquisition/`](../data-acquisition/)
-into flat JSON. There is one script per source, and each one is fully
-independent: it reads its own raw data and writes its own two output files. No
-state is shared between them.
+Turns the raw downloads from stage 1 into flat JSON: one `entities.json` and one
+`relationships.json` per source, 10 files in total. Standard library only.
 
-| Folder | Script | Reads |
-|---|---|---|
-| [`CWE/`](CWE/README.md) | `cwe_preprocessing.py` | `data-acquisition/CWE/latest.json` |
-| [`CAPEC/`](CAPEC/README.md) | `capec_preprocessing.py` | `data-acquisition/CAPEC/latest.json` |
-| [`CVE/`](CVE/README.md) | `cve_preprocessing.py` | `data-acquisition/CVE/records/<year>/latest.json` |
-| [`mitre-attack/`](mitre-attack/README.md) | `mitre_attack_preprocessing.py` | the three ATT&CK domain bundles |
-| [`mitre-defend/`](mitre-defend/README.md) | `mitre_defend_preprocessing.py` | five of the six D3FEND domain files |
+## Run it
 
-## Running
-
-```
-py main.py                       # run every script
-py main.py --only cwe capec      # run just these
-py main.py --skip mitre-defend   # run everything except this
+```bash
+py main.py                          # all five sources
+py main.py --only cwe capec         # just these
+py main.py --skip mitre-defend      # all but this
+py CWE/cwe_preprocessing.py         # one source directly
 ```
 
-`main.py` just runs each script in a subprocess, using the same Python
-interpreter, and prints a pass/fail summary. Each script's output streams
-straight through as it runs. The exit code is 0 only if every script that ran
-exited 0.
-
-Each script works out its own default `--input` and `--output-dir` from its own
-file location, so the working directory doesn't matter. You can also run one
-directly:
-
-```
-py CWE/cwe_preprocessing.py
-```
+Each script finds its input and output folders from its own location, so the
+working directory does not matter. `main.py` exits 0 only if every script did.
 
 ## What comes out
 
-Exactly 10 files - an `entities.json` and a `relationships.json` in each of the
-five source folders. Five rules hold for all of them:
+| Source | Entities | Links | Entity types |
+|---|---|---|---|
+| `CVE/` | 359,355 | 336,339 | `vulnerability` |
+| `mitre-attack/` | 5,659 | 33,105 | technique, malware, intrusion-set, tool, campaign, mitigation, tactic, analytic, detection strategy, data component, asset, matrix |
+| `CWE/` | 5,040 | 16,767 | weakness, category, view, platform, mitigation, detection method, consequence |
+| `CAPEC/` | 1,492 | 2,155 | attack-pattern, course-of-action |
+| `mitre-defend/` | 1,193 | 5,056 | technique, tactic, artifact |
 
-- **Nothing nests.** Every value is a single value or a list of single values -
-  never a map, never a record inside a record. Every nested field in the source
-  is either flattened, split out into its own records, or dropped; each source's
-  README says which, and why.
-- **Ids are readable.** `CVE-2021-44228`, `CWE-79`, `CAPEC-85`, `T1055` - not
-  random ids. Where the source used a STIX id, it is kept alongside as `stix_id`.
-- **Entities and links are separate files.** Inside each file, a record's own
-  `type` field says what kind it is (`weakness`, `attack-technique`,
-  `vulnerability`, ...), so nothing else is needed to tell the kinds apart.
-- **Every record says which catalog asserted it.** `source` is on every entity and
-  every link, holding this folder's own name for itself (`cve`, `cwe`, `capec`,
-  `mitre-attack`, `mitre-defend`). It is what tells two same-named records from
-  different catalogs apart once they leave here, and it is distinct from the
-  `source_name` a few links carry, which names the *foreign* catalog a
-  cross-catalog link points at.
-- **Every record says when it was collected.** `collected_at` is on every entity and
-  every link, taken from that source's `data-acquisition/<SOURCE>/manifest.json`
-  (`last_successful_fetch`, falling back to `generated_at`) - the time the *crawler*
-  last fetched, never the time preprocessing happened to run. That distinction is what
-  keeps the rule below true: a wall-clock stamp would make every re-run differ, and a
-  checksum could no longer tell "the source changed" apart from "I ran it again".
-  ATT&CK merges three domain bundles fetched seconds apart, so it quotes the latest of
-  the three. It is one value per source per crawl, so it costs about 9 MB across the
-  766,161 records and never varies within a file.
+## Rules every output follows
+
+- **Nothing nests.** Every value is a single value or a list of single values.
+  Nested source fields are flattened, split into their own records, or dropped.
+- **Ids are readable:** `CVE-2021-44228`, `CWE-79`, `CAPEC-85`, `T1055`. Where
+  the source used a STIX id, it is kept as `stix_id`.
+- **Entities and links are separate files,** and each record's `type` says what
+  kind it is.
+- **Links across catalogs use the other catalog's own id** (a CVE links to
+  `CWE-79`, not to a copy), so stage 3 can join them with no mapping table.
+- **Every record has `source`** (`cve`, `cwe`, `capec`, `mitre-attack`,
+  `mitre-defend`) **and `collected_at`** (when the crawler fetched it, not when
+  this script ran).
 - **Re-runs are byte-identical.** Generated ids are `uuid5` hashes of the
-  record's own content, never random, so re-processing unchanged input produces
-  an unchanged file.
+  record's content.
+- **Text is cleaned the same way everywhere** (`common/`): line endings and odd
+  spaces normalised, runs of blank lines collapsed, empty strings dropped, lists
+  deduplicated. Markup that is *content* (an XSS payload in a description) is
+  left untouched; CWE's and CAPEC's XHTML formatting is flattened to plain text.
 
-Links that point at *another* catalog carry a `source_name` field. (D3FEND is
-the exception, and its README explains why.)
+## Key decisions per source
 
-## Text cleanup applied to everything
+**CVE**
+- Severity scores are properties on the CVE (`cvss_base_score`, `cvss_version`,
+  …), not separate nodes. When a CVE is scored more than once, one winner is
+  picked: newest CVSS version, then NVD over vendor, then the higher score.
+  Disagreement is kept as `cvss_base_score_min`/`_max` (51,762 CVEs).
+- Dropped: 17,958 rejected/empty CVEs; anything derivable from the vector string
+  (checked: 0 mismatches when rebuilt); reference URLs; the CPE "affected
+  versions" tree (3.1M entries that cannot be flattened without losing meaning);
+  NVD's placeholder CWEs (`NVD-CWE-noinfo`).
 
-Every script ends with `clean_record()`, which runs over every entity and every
-link on the way out, so no builder has to remember to tidy up after itself. Per
-string it:
+**CWE**
+- Embedded sub-records become their own nodes where they are genuinely shared:
+  platforms, mitigations, detection methods and consequences. Per-weakness
+  details are copied onto the link, since the same mitigation can read
+  differently for different weaknesses.
+- Field names are converted to snake_case; alternate terms become an `aliases`
+  list (the name all five sources now share).
 
-- normalizes line endings to LF (CRLF and lone CR both become LF)
-- turns odd space characters - non-breaking spaces, tabs and other exotic
-  spaces - into a plain space
-- collapses runs of spaces, and trims each line
-- collapses three or more newlines into a single blank line
+**CAPEC**
+- `external_references` is split: the CAPEC entry gives the `id`, ATT&CK
+  entries become links, and CWE entries are dropped as an exact mirror of CWE's
+  own links.
+- Mirror links are kept one way only (`child_of`, not also `parent_of`).
 
-Blank lines between paragraphs survive, because they carry meaning; the
-indentation the source document was pretty-printed with does not. A string left
-empty is dropped rather than written as `""`, and list values are deduplicated.
+**MITRE ATT&CK**
+- The three domains (enterprise, mobile, ICS) are merged into one set, because
+  groups and malware appear in several domains under the same id.
+- 226 ids were claimed by two objects upstream (mostly old mitigations reusing a
+  technique id). The loser is deleted, never renamed; afterwards every id is
+  unique and every link resolves.
+- Technique → tactic is derived into `has_tactic` links (ATT&CK stores it only
+  as a string match).
 
-**Two things are deliberately left alone.** Markup that is quoted **content**
-stays exactly as it is - XSS payloads, SOAP envelopes, C includes and
-`<a>`/`<script>` samples appear inside these descriptions as the thing being
-described, so stripping them would destroy the text. And a lone newline only
-becomes a space where the source is known to hard-wrap its text; elsewhere it is
-a real line break and is kept.
+**MITRE D3FEND**
+- JSON-LD field names are renamed to plain snake_case (`d3f:definition` →
+  `description`).
+- D3FEND's copies of CWE weaknesses and ATT&CK techniques get no records of
+  their own; links point straight at the CWE and ATT&CK ids.
+- Its 70 artifact relation names are grouped into 8 buckets per side
+  (offensive: accesses, creates, modifies, executes; defensive: observes,
+  constrains, hardens, restores). The original name stays on each link as
+  `verb`, so nothing is lost.
 
-CWE, CAPEC and ATT&CK each have extra source-specific cleanup on top of this -
-XHTML flattening, literal `"None"` strings, and so on. See their own READMEs.
+## Good to know
 
-## Where to read what
-
-Each source's README explains **why** each field was kept, renamed, split out or
-dropped, and lists the exact output counts per `type`. Start with the one for
-the source you are working on.
-
-`DATA_PROVENANCE_REPORT` covers all five at once from the other direction: every
-entity type, every property and every relationship type in the output, with the
-exact raw field each one came from and what happened to it on the way. Read it
-when the question is *"where did this field come from?"* rather than *"how does
-this source work?"*. Two formats, same subject:
-
-- [`DATA_PROVENANCE_REPORT.docx`](../../reports/DATA_PROVENANCE_REPORT.docx) -
-  one numbered section per type (25 entity types, 42 relationship types, 67
-  sections), each showing a real raw record, the same thing after preprocessing,
-  and a field-by-field table of what changed. Editable in Word. It lives in
-  `Trace Paper/reports/`, outside this repository, because generated `.json` is
-  gitignored here and the report is a hand-editable deliverable rather than
-  build output.
-- `DATA_PROVENANCE_REPORT.md` - **not written yet.** The same ground organised by
-  source rather than by type, for reading in git.
+- A field-by-field provenance report (every type and property, traced to its
+  raw field) is in `Trace Paper/reports/DATA_PROVENANCE_REPORT.docx`, outside
+  this repo.
+- Each `<source>_preprocessing.py` explains its choices in its docstring and
+  comments. The longer per-source write-ups (every field kept, renamed or
+  dropped, with counts) were removed from this folder on 2026-09-24 and are
+  still in git history.

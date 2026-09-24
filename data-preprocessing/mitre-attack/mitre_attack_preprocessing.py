@@ -1,4 +1,4 @@
-"""MITRE ATT&CK field-projection preprocessor. Full rationale in README.md.
+"""MITRE ATT&CK field-projection preprocessor. Summary in ../README.md; the long-form rationale is in git history.
 
 Merges the three raw STIX 2.1 bundles from the ATT&CK crawler
 (`data-acquisition/mitre-attack/{enterprise,mobile,ics}/latest.json`) into two

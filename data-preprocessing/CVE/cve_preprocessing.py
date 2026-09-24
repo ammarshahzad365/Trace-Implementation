@@ -1,4 +1,4 @@
-"""CVE field-projection preprocessor. Full rationale in README.md.
+"""CVE field-projection preprocessor. Summary in ../README.md; the long-form rationale is in git history.
 
 Reads the CVE crawler's per-year STIX 2.1 bundles
 (`data-acquisition/CVE/records/<year>/latest.json`) and combines them into two

@@ -1,4 +1,4 @@
-"""CWE field-projection preprocessor. Full rationale in README.md.
+"""CWE field-projection preprocessor. Summary in ../README.md; the long-form rationale is in git history.
 
 Reads the CWE crawler's JSON bundle (`data-acquisition/CWE/latest.json`) and
 writes two files: `entities.json` (weaknesses, categories, views, and the

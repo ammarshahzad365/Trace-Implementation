@@ -3,7 +3,7 @@
 Runs every data source's own `full_crawler.py` in turn (CVE, CWE, CAPEC,
 MITRE ATT&CK, MITRE D3FEND), each as a subprocess with that source's folder as
 the working directory. This is a thin loop around the same entry points
-documented in each source's own README -- it does not duplicate any fetch
+each source folder provides -- it does not duplicate any fetch
 logic itself.
 """
 

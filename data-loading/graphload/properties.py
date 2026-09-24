@@ -10,7 +10,7 @@ dropped for being redundant or uninteresting. `x_nvd_vuln_status` stays
 `x_nvd_vuln_status`. If a property name is wrong, the fix belongs in
 `data-preprocessing/`, where it can be documented next to the raw field it came
 from -- not hidden in a loader that would then quietly disagree with that
-source's README.
+source's preprocessing script.
 
 The structural fields are the ones `spec.py` names: a record's `type` (it became
 the label) and an edge row's `relationship_type`/`source_ref`/`target_ref` (they

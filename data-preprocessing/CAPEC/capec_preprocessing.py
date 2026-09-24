@@ -1,4 +1,4 @@
-"""CAPEC field-projection preprocessor. Full rationale in README.md.
+"""CAPEC field-projection preprocessor. Summary in ../README.md; the long-form rationale is in git history.
 
 Reads the CAPEC crawler's STIX 2.1 bundle (`data-acquisition/CAPEC/latest.json`)
 and writes two files: `entities.json` (attack patterns and courses of action)

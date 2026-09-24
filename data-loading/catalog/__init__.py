@@ -9,7 +9,7 @@ is deliberately no place in this package to put a rule that changes what a
 record means -- no field renames, no derived values, no retyped links, no merge
 rules. That absence is the design: it is what keeps the graph a faithful
 projection of `data-preprocessing/` output, so a property in Neo4j can always be
-traced to a documented field in a source's README.
+traced to a field that source's preprocessing script documents.
 """
 
 from __future__ import annotations

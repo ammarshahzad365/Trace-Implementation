@@ -1,173 +1,214 @@
 # Trace-Implementation
 
-This project pulls five public cyber-security catalogs from the internet, cleans
-them up, turns them into one connected set of entity and relationship files,
-loads that into Neo4j as a single queryable knowledge graph — and then grows the
-graph from prose, using a local LLM to read APT reports, advisories and papers
-the way the TRACE paper describes.
+A reproduction of the TRACE paper. It downloads five public cyber-security
+catalogs, cleans them, loads them into one Neo4j knowledge graph, and then grows
+that graph from plain-text reports using a local LLM.
 
 ## The four stages
 
 | Stage | Folder | What it does |
 |---|---|---|
-| **1. Get the data** | [`data-acquisition/`](data-acquisition/) | Downloads CVE, CWE, CAPEC, ATT&CK and D3FEND and saves a local copy you can re-check and diff |
-| **2. Clean the data** | [`data-preprocessing/`](data-preprocessing/) | Turns each source into flat JSON: one entity file and one relationship file per source |
-| **3. Load the graph** | [`data-loading/`](data-loading/) | Streams those ten files into Neo4j — 372,739 nodes and 393,418 relationships — and serves an HTTP API for records that arrive later |
-| **4. Read the prose** | [`data-extraction/`](data-extraction/) | Posts an unstructured document to a local LLM, extracts entities and relations, aligns them with what the graph already knows, and writes through stage 3's API |
+| 1. Get the data | [`data-acquisition/`](data-acquisition/README.md) | Downloads CVE, CWE, CAPEC, ATT&CK and D3FEND |
+| 2. Clean the data | [`data-preprocessing/`](data-preprocessing/README.md) | Turns each source into two flat JSON files (10 in total) |
+| 3. Load the graph | [`data-loading/`](data-loading/README.md) | Loads the 10 files into Neo4j and serves an API for adding records later |
+| 4. Read reports | [`data-extraction/`](data-extraction/README.md) | Extracts entities and relationships from prose with a local LLM and adds them to the graph |
 
-Each stage only reads the stage before it, so you can re-run any one of them on
-its own. Stages talk through files and HTTP, never imports.
+Each stage reads only the output of the stage before it, through files or HTTP,
+never through imports. Any stage can be re-run on its own.
 
-## Running it
+## How to run everything
 
-You need Python 3.12 or newer. Stage 3 also needs a Neo4j 5.x server; see
-[`data-loading/README.md`](data-loading/README.md#starting-a-database).
+The live copy runs on the university server **dinf-anhinga (10.44.83.124)**,
+in `~/trace/`, and the graph there is already loaded. If you only want to use
+it, skip to [step 4](#4-start-the-services-on-the-server).
 
-### 1. Credentials
+### 1. What you need
 
-Make a `.env` file in this folder. It is gitignored, so nothing in it reaches
-git — [`.env.example`](.env.example) lists every key with its default:
+- Python 3.12 or newer
+- Neo4j 5.x (stages 3 and 4) — see [data-loading](data-loading/README.md#starting-a-database)
+- Ollama and a GPU with ~40 GB (stage 4 only)
 
-```ini
-# Only needed for stage 1. Free key: https://nvd.nist.gov/developers/request-an-api-key
-# Without a key NVD allows 5 requests per 30s instead of 50 - about 10x slower.
-NVD_API_KEY=<your key>
+Install each stage's dependencies once:
 
-# Needed for stage 3.
-NEO4J_PASSWORD=<your password>
+```bash
+py -m pip install -r data-loading/requirements.txt
+py -m pip install -r data-extraction/requirements.txt
 ```
 
-### 2. Download the raw data
+Stages 1 and 2 use only the standard library. On the Linux server use
+`../.venv/bin/python` (or `python3`) wherever this page says `py`.
+
+### 2. Credentials
+
+Copy [`.env.example`](.env.example) to `.env` in the repo root and fill it in.
+`.env` is gitignored.
+
+```ini
+NVD_API_KEY=<your key>       # stage 1; free at nvd.nist.gov, ~10x faster with it
+NEO4J_PASSWORD=<password>    # stages 3 and 4
+ALIGN_THRESHOLD=0.55         # stage 4; the calibrated value (see data-extraction)
+```
+
+### 3. Build the graph (stages 1–3)
+
+Only needed once, or when you want fresh data. Neo4j keeps the graph on disk,
+so it survives restarts.
 
 ```bash
 cd data-acquisition
-py -m full_crawler              # everything, from scratch (takes a few hours)
-py -m incremental_crawler       # later runs: only fetch what changed
-py -m full_crawler --dry-run    # check what would change, write nothing
+py -m full_crawler              # first time: everything (a few hours)
+py -m incremental_crawler       # later: only what changed
+
+cd ../data-preprocessing
+py main.py                      # writes the 10 JSON files
+
+cd ../data-loading
+py main.py --dry-run            # check the files; needs no database
+py main.py --check              # check the database connection
+py main.py                      # load (about 2 minutes)
 ```
 
-Add `--sources cve` to run just one source. Details are in
-[`data-acquisition/README.md`](data-acquisition/README.md) and in each source's
-own README.
+A good load reports **372,739 nodes and 393,418 relationships**.
 
-### 3. Clean it into flat JSON
+### 4. Start the services on the server
+
+Nothing restarts by itself after a reboot. Start these four **in order**, each
+in its own SSH command. The `< /dev/null ... &` part matters: without it the SSH
+session hangs.
 
 ```bash
-cd data-preprocessing
-py main.py                      # all five sources
-py main.py --only cwe capec     # or just some of them
+# 1. Neo4j — the graph (ports 7474, 7687)
+ulimit -n 40000; ~/opt/neo4j/bin/neo4j start
+
+# 2. Ingest API — writes new records (port 8000)
+cd ~/trace/data-loading && setsid nohup ../.venv/bin/python -m ingest.serve > ~/ingest.log 2>&1 < /dev/null &
+
+# 3. Ollama — the LLM and the embedder (port 11434)
+setsid nohup ~/ollama/start.sh > ~/ollama/serve.log 2>&1 < /dev/null &
+
+# 4. Extraction API — the review page (port 8100)
+setsid nohup ~/extract-serve.sh > ~/extract.log 2>&1 < /dev/null &
 ```
 
-This writes exactly 10 files: an `entities.json` and a `relationships.json` in
-each of the five source folders. Nothing is nested, ids are readable, entities
-and links are kept apart, and re-runs are byte-identical.
-[`data-preprocessing/README.md`](data-preprocessing/README.md) explains those
-rules and the shared text cleanup; each source folder has its own README saying
-why each field was kept, renamed or dropped.
+To stop: `~/opt/neo4j/bin/neo4j stop`, `pkill -f '[i]ngest.serve'`,
+`pkill -f '[e]xtract.serve'`. Keep the square brackets, or `pkill` matches its
+own command line and kills your shell.
 
-### 4. Load it into Neo4j
+### 5. Connect from your laptop
+
+Everything binds to `127.0.0.1` on the server, so reach it through an SSH
+tunnel. Leave this terminal open; the tunnel is the connection.
 
 ```bash
-cd data-loading
-py -m pip install -r requirements.txt
-py main.py --dry-run            # validate the files; needs no database
-py main.py --check              # confirm Python can reach the database
-py main.py                      # load, about two minutes
+ssh -L 7474:localhost:7474 -L 7687:localhost:7687 -L 8000:localhost:8000 -L 8100:localhost:8100 <user>@10.44.83.124
 ```
 
-You run this once — Neo4j keeps the graph on disk, so it survives restarts.
-[`data-loading/README.md`](data-loading/README.md) covers starting a database,
-connecting through an SSH tunnel, and [`queries.cypher`](data-loading/queries.cypher)
-has a starter set including the CVE → CWE → CAPEC → ATT&CK → D3FEND traversal
-this project exists for.
+| Page | Address |
+|---|---|
+| Neo4j Browser (view the graph) | http://localhost:7474 |
+| Ingest API docs | http://localhost:8000/docs |
+| Extraction review page | http://localhost:8100/ui |
 
-### 5. Extract from unstructured text
+### 6. View the knowledge graph
+
+Open http://localhost:7474 and log in with connect URL `bolt://localhost:7687`,
+user `neo4j` and the password from `.env`. Type a query in the top bar and press
+**Ctrl+Enter**.
+
+```cypher
+// The shape of the whole graph: every label and how they connect
+CALL db.schema.visualization();
+
+// One full attack chain: a CVE through to the defences against it
+MATCH path = (v:Vulnerability {id: 'CVE-2021-44228'})-[:RELATED_TO]->(:Weakness)
+      -[:RELATED_TO]->(:AttackPattern)-[:RELATED_TO]->(:AttackTechnique)
+      <-[:COUNTERS]-(:DefensiveTechnique)
+RETURN path LIMIT 25;
+
+// Everything one report added (use the report's source id)
+MATCH path = ()-[r]->() WHERE r.source = 'report.txt' RETURN path LIMIT 50;
+```
+
+- Click a node to see its properties; double-click to expand its neighbours.
+- A query that returns nodes or paths draws a graph; one that returns counts or
+  text gives a table.
+- Always use `LIMIT`. `MATCH (n) RETURN n` over 372,739 nodes draws nothing useful.
+- More queries: [`data-loading/queries.cypher`](data-loading/queries.cypher).
+
+### 7. Extract from a report
+
+First time only (already done on the server):
 
 ```bash
+ollama pull qwen3:32b           # the extractor, ~20 GB
+ollama pull bge-m3              # the embedder, ~1.2 GB
 cd data-extraction
-py -m pip install -r requirements.txt
-py -m extract.embed_corpus          # once: index existing nodes for alignment
-py -m extract.serve                 # http://127.0.0.1:8100/docs
+py -m extract.embed_corpus --all-except Vulnerability   # vectors for alignment
 ```
 
-Needs Ollama running locally with the extractor and embedder pulled. POST a
-report, poll the job, review what it proposes, commit. Every merge decision and
-every edge's justifying sentence is shown before anything is written.
-[`data-extraction/README.md`](data-extraction/README.md) has the walkthrough and
-the measurements behind the model and threshold choices.
+Then, every time:
 
-### Keeping it up to date
+1. Open http://localhost:8100/ui.
+2. Upload a `.txt` or `.md` file (convert PDFs first) and choose its genre:
+   APT report, repair notice or paper.
+3. Wait a few minutes while it runs.
+4. Check what it found, remove anything wrong, approve.
+5. Check the matches to existing nodes, then commit. Only now is anything written.
+
+Or in one call: `curl -s localhost:8100/extract/file -F "file=@report.txt" -F "genre=apt-report"`.
+
+### 8. Keep it up to date
 
 ```bash
-cd data-acquisition      && py -m incremental_crawler   # fetch what changed
-cd ../data-preprocessing && py main.py                  # clean it again
-cd ../data-loading       && py main.py                  # load it again
+cd data-acquisition   && py -m incremental_crawler
+cd ../data-preprocessing && py main.py
+cd ../data-loading    && py main.py
 ```
+
+Re-loading is safe: records are merged on their ids, never duplicated.
+
+### 9. Check it works
+
+| Service | Check (on the server) |
+|---|---|
+| Neo4j | `~/opt/neo4j/bin/neo4j status` |
+| Ingest API | `curl localhost:8000/health` |
+| Ollama | `curl localhost:11434/api/tags` |
+| Extraction API | `curl localhost:8100/docs` |
+
+| Problem | Fix |
+|---|---|
+| Nothing responds | The server rebooted. Redo step 4. |
+| Tunnel will not bind 7474/7687 | A local Neo4j or old tunnel holds the ports. Stop it. |
+| `NEO4J_PASSWORD is not set` | Create or fill in `.env`. |
+| Neo4j dies on start with `Invalid memory configuration` | Heap + page cache exceed RAM; lower them in `conf/neo4j.conf`. |
+| An extraction job shows `interrupted` | The API restarted mid-run. Submit it again. |
+| Commit fails with "not declared in catalog/labels.py" | The server's `data-loading/` is out of date. Copy it over and restart the ingest API. |
 
 ## The five sources
 
-| Source | What it adds | Entities | Links | Comes from |
-|---|---|---|---|---|
-| **CVE** (NVD) | Real, specific vulnerabilities, plus their severity scores | 359,355 | 336,339 | NVD REST API 2.0 |
-| **MITRE ATT&CK** | What attackers do: techniques, malware, groups, detections | 5,659 | 33,105 | TAXII 2.1 |
-| **CWE** | Kinds of software weakness, and how to fix them | 5,040 | 16,767 | Versioned XML catalog |
-| **CAPEC** | Attack patterns: how a weakness gets abused | 1,492 | 2,155 | Pre-built STIX bundle |
-| **MITRE D3FEND** | Defences, and what each one counters | 1,193 | 5,056 | D3FEND REST API |
+| Source | What it adds | Entities | Links |
+|---|---|---|---|
+| CVE (NVD) | Specific vulnerabilities and their severity scores | 359,355 | 336,339 |
+| MITRE ATT&CK | What attackers do: techniques, malware, groups, detections | 5,659 | 33,105 |
+| CWE | Kinds of software weakness, and their fixes | 5,040 | 16,767 |
+| CAPEC | Attack patterns: how a weakness gets abused | 1,492 | 2,155 |
+| MITRE D3FEND | Defences, and what each one counters | 1,193 | 5,056 |
 
-Counted from the `relationships.json` each source produces. The graph holds
-fewer relationships than the column totals (393,418 against 393,422): a handful
-of edges name an endpoint no catalog publishes — CWE citing CVEs NVD rejected —
-and those are reported and skipped rather than invented.
-
-
+The links add up to 393,422; the graph holds 393,418 because 4 CWE links cite
+CVEs that NVD never published, and those are skipped rather than invented.
+Only 23.8% of CVEs reach a D3FEND defence through the full chain; the gaps are
+in the source data (56,702 CVEs have no CWE at all).
 
 ## Folder map
 
 ```
-.env                     credentials, gitignored
-.env.example             every key it can hold, with defaults
-README.md                you are here
-
-data-acquisition/        stage 1 - five crawlers plus one runner for all of them
-  DATA_STORAGE_REPORT.md what the raw data looks like, per source
-  <SOURCE>/              client.py, full_crawler.py, incremental_crawler.py, README.md
-
-data-preprocessing/      stage 2 - five cleaners plus one runner
-  README.md              output rules shared by all five, and the text cleanup
-  main.py                runs all five
-  <SOURCE>/              <source>_preprocessing.py, entities.json,
-                         relationships.json, README.md
-
-data-loading/            stage 3 - the ten files become one Neo4j graph
-  README.md              running it, connecting to the graph, adding a source
-  main.py                the batch loader, five stages
-  graphload/             the engine: reads records, names them, writes them
-  catalog/               this dataset as declarations - five specs, two name maps
-  ingest/                HTTP API for records that arrive after the load
-  queries.cypher         starter queries, including the full CVE-to-D3FEND path
-
-data-extraction/         stage 4 - prose becomes records, through a local LLM
-  README.md              running it, reviewing a proposal, what was measured
-  extract/               the pipeline: ontology, prompts, alignment, jobs, API
-  extract/eval/          the threshold calibration and its gold set
+.env.example            every setting, with defaults (copy to .env)
+data-acquisition/       stage 1: one crawler folder per source
+data-preprocessing/     stage 2: one cleaner per source, plus main.py
+data-loading/           stage 3: main.py (batch loader), ingest/ (API), queries.cypher
+data-extraction/        stage 4: extract/ (pipeline, API, review page, calibration)
 ```
 
-Everything the code generates is gitignored (`*.json`). Those files are derived
-from the sources, so they are meant to be regenerated, not committed.
-
-## Where to read what
-
-Docs sit next to the code they describe, and explain **why** a decision was made
-rather than repeating what the code does.
-
-| Question | Read |
-|---|---|
-| How do I run everything? | this file |
-| What do the cleaned output files look like? | [`data-preprocessing/README.md`](data-preprocessing/README.md) |
-| What does the raw downloaded data look like? | [`data-acquisition/DATA_STORAGE_REPORT.md`](data-acquisition/DATA_STORAGE_REPORT.md) |
-| How does one crawler work? | that source's `data-acquisition/<SOURCE>/README.md` |
-| Why was this field dropped, renamed or split out? | that source's `data-preprocessing/<SOURCE>/README.md` |
-| How do I start Neo4j, connect to it, or query the graph? | [`data-loading/README.md`](data-loading/README.md) |
-| How do I add records after the load? | [`data-loading/ingest/README.md`](data-loading/ingest/README.md) |
-| How do I extract records from a report or paper? | [`data-extraction/README.md`](data-extraction/README.md) |
-| Which entity and relation types can the LLM produce, and why those? | [`data-extraction/extract/ontology.py`](data-extraction/extract/ontology.py) |
+Everything generated (`*.json`, `.cache/`) is gitignored and can be rebuilt.
+Each folder has one README; module docstrings explain the reasoning in detail.

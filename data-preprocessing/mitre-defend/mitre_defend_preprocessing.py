@@ -1,4 +1,4 @@
-"""MITRE D3FEND field-projection preprocessor. Full rationale in README.md.
+"""MITRE D3FEND field-projection preprocessor. Summary in ../README.md; the long-form rationale is in git history.
 
 Reads six raw JSON files from the D3FEND crawler
 (`data-acquisition/mitre-defend/{techniques,tactics,artifacts,weaknesses,
@@ -42,8 +42,8 @@ row set, for `technique --{relation}--> artifact`, `technique --enables--> tacti
 
 The artifact relations are bucketed rather than kept one type per name: D3FEND's
 70 relation names produced 67 `relationship_type` values here, 61 of them sharing
-648 edges. See `ARTIFACT_RELATION_BUCKETS` below for why, and README.md for the
-bucket table. The original name survives on every such edge as `verb`, so the
+648 edges. See `ARTIFACT_RELATION_BUCKETS` below for why and for the bucket
+list. The original name survives on every such edge as `verb`, so the
 reduction is lossless.
 
 Every string is normalized on the way out by `clean_record()`: CRLF to LF,
